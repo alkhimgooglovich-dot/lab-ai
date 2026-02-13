@@ -994,6 +994,74 @@ def parse_items_from_candidates(raw_text: str) -> List[Item]:
     return items
 
 
+def parse_with_fallback(raw_text: str) -> List[Item]:
+    """
+    Архитектура "baseline-first + safe-fallback":
+
+    1. Всегда сначала запускаем baseline-парсер (parse_items_from_candidates).
+    2. Оцениваем качество результатов через evaluate_parse_quality.
+    3. Если (coverage_score < 0.6) ИЛИ (suspicious_count > 0):
+       → запускаем fallback_generic
+       → выбираем результат с лучшим quality score.
+    4. Иначе используем baseline как есть.
+
+    ВАЖНО: baseline-логика НЕ изменяется. Fallback — отдельный модуль.
+    """
+    from parsers.quality import evaluate_parse_quality
+    from parsers.fallback_generic import fallback_parse_candidates
+
+    # --- ШАГ 1: baseline ---
+    baseline_items = parse_items_from_candidates(raw_text) if "\t" in raw_text else []
+    if not baseline_items:
+        # Baseline ничего не дал — пробуем fallback
+        _dbg("parse_with_fallback: baseline returned 0 items, trying fallback")
+        fallback_items = fallback_parse_candidates(raw_text)
+        if fallback_items:
+            _dbg(f"parse_with_fallback: fallback returned {len(fallback_items)} items")
+            return fallback_items
+        return baseline_items  # пустой список
+
+    # --- ШАГ 2: оцениваем качество baseline ---
+    baseline_quality = evaluate_parse_quality(baseline_items)
+    _dbg(f"parse_with_fallback: baseline quality={baseline_quality}")
+
+    needs_fallback = (
+        baseline_quality["coverage_score"] < 0.6
+        or baseline_quality["suspicious_count"] > 0
+    )
+
+    if not needs_fallback:
+        # Baseline достаточно хорош — возвращаем его
+        _dbg("parse_with_fallback: baseline OK, no fallback needed")
+        return baseline_items
+
+    # --- ШАГ 3: fallback ---
+    _dbg("parse_with_fallback: baseline insufficient, running fallback")
+    fallback_items = fallback_parse_candidates(raw_text)
+
+    if not fallback_items:
+        _dbg("parse_with_fallback: fallback returned 0 items, using baseline")
+        return baseline_items
+
+    fallback_quality = evaluate_parse_quality(fallback_items)
+    _dbg(f"parse_with_fallback: fallback quality={fallback_quality}")
+
+    # --- ШАГ 4: выбираем лучший ---
+    # Критерий: больше parsed, меньше suspicious, выше coverage
+    def _score(q: dict) -> float:
+        return q["parsed_count"] - q["suspicious_count"] * 5 - q["error_count"] * 2
+
+    baseline_score = _score(baseline_quality)
+    fallback_score = _score(fallback_quality)
+
+    if fallback_score > baseline_score:
+        _dbg(f"parse_with_fallback: fallback wins (score {fallback_score} > {baseline_score})")
+        return fallback_items
+    else:
+        _dbg(f"parse_with_fallback: baseline wins (score {baseline_score} >= {fallback_score})")
+        return baseline_items
+
+
 def detect_panel(parsed_names: Set[str]) -> Dict[str, int]:
     """
     Определяет тип панели анализов по наличию маркеров.
@@ -1630,7 +1698,8 @@ def generate_pdf_report(
         if candidates:
             raw_text = candidates
 
-    items = parse_items_from_candidates(raw_text) if "\t" in raw_text else []
+    # === BASELINE-FIRST + FALLBACK ===
+    items = parse_with_fallback(raw_text)
     if not items:
         raise ValueError(
             "Не удалось собрать показатели.\n"
@@ -1640,7 +1709,7 @@ def generate_pdf_report(
             "• outputs/ocr_debug.txt\n"
         )
 
-    _dbg(f"parse_items_from_candidates: parsed {len(items)} items")
+    _dbg(f"parse_with_fallback: итого {len(items)} items")
     for it in items[:5]:  # Логируем первые 5 для отладки
         _dbg(f"  item: {it.name} value={it.value} ref={format_range(it.ref)} status={it.status}")
 
