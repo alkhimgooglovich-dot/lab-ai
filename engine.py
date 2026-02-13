@@ -892,6 +892,26 @@ def helix_table_to_candidates(plain_text: str) -> str:
     return "\n".join(merged).strip()
 
 
+def _smart_to_candidates(raw_text: str) -> str:
+    """
+    Авто-детект формата лаборатории и преобразование в TSV-кандидаты.
+
+    Если текст похож на МЕДСИ → medsi_inline_to_candidates (отдельный модуль).
+    Иначе → helix_table_to_candidates (baseline, не меняем).
+    """
+    from parsers.medsi_extractor import is_medsi_format, medsi_inline_to_candidates
+
+    if is_medsi_format(raw_text):
+        _dbg("_smart_to_candidates: detected MEDSI format")
+        candidates = medsi_inline_to_candidates(raw_text)
+        if candidates:
+            _dbg(f"_smart_to_candidates: MEDSI → {len(candidates.splitlines())} candidates")
+            return candidates
+        _dbg("_smart_to_candidates: MEDSI extractor empty, falling back to helix")
+
+    return helix_table_to_candidates(raw_text)
+
+
 def parse_items_from_candidates(raw_text: str) -> List[Item]:
     """
     Поддерживаем:
@@ -1604,7 +1624,7 @@ def extract_text_from_upload(file_bytes: bytes, filename: str, mimetype: str) ->
         _dbg("PDF upload detected")
 
         direct_text = try_extract_text_from_pdf_bytes(file_bytes)
-        direct_candidates = helix_table_to_candidates(direct_text) if direct_text else ""
+        direct_candidates = _smart_to_candidates(direct_text) if direct_text else ""
         _dbg(f"pypdf candidates_lines={len(direct_candidates.splitlines()) if direct_candidates else 0}")
 
         # Если pypdf дал уже достаточно строк — берём его (быстро)
@@ -1652,7 +1672,7 @@ def extract_text_from_upload(file_bytes: bytes, filename: str, mimetype: str) ->
                 ocr_plain = ocr_result_to_plaintext(res)
                 OCR_PLAIN_PATH.write_text(ocr_plain or "", encoding="utf-8")
 
-                ocr_candidates = helix_table_to_candidates(ocr_plain or "")
+                ocr_candidates = _smart_to_candidates(ocr_plain or "")
                 _dbg(f"OCR plain_len={len(ocr_plain)} candidates_lines={len(ocr_candidates.splitlines()) if ocr_candidates else 0}")
                 break
 
@@ -1691,7 +1711,7 @@ def extract_text_from_upload(file_bytes: bytes, filename: str, mimetype: str) ->
     plain = ocr_result_to_plaintext(ocr)
     OCR_PLAIN_PATH.write_text(plain or "", encoding="utf-8")
 
-    candidates = helix_table_to_candidates(plain or "")
+    candidates = _smart_to_candidates(plain or "")
     OCR_CANDIDATES_PATH.write_text(candidates or "", encoding="utf-8")
 
     # если кандидаты пустые — вернём хотя бы plain, чтобы не было "пусто"
@@ -1746,7 +1766,7 @@ def generate_pdf_report(
 
     # если это plain-текст — пытаемся собрать кандидатов
     if "\t" not in raw_text:
-        candidates = helix_table_to_candidates(raw_text)
+        candidates = _smart_to_candidates(raw_text)
         if candidates:
             raw_text = candidates
 
