@@ -321,6 +321,44 @@ class Item:
     ref: Optional[Range]
     ref_source: str
     status: str
+    confidence: float = 0.0   # 0..1, вычисляется после парсинга
+
+
+# ==========================
+# CONFIDENCE
+# ==========================
+def compute_item_confidence(it: Item) -> float:
+    """
+    Расчёт confidence для одного показателя:
+      1.0 — value валидное + ref валиден + unit не пустой
+      0.7 — value валидное + ref валиден, unit пустой
+      0.5 — value валидное, но ref отсутствует
+      0.0 — value подозрительное / None
+    """
+    if it.value is None:
+        return 0.0
+
+    # Подозрительное значение → 0.0
+    raw = it.raw_name or ""
+    if any(ch in raw for ch in ['^', '*', '/']):
+        import re as _re
+        if not _re.search(r"\*10\^\d+", raw):
+            return 0.0
+
+    has_ref = it.ref is not None
+    has_unit = bool((it.unit or "").strip())
+
+    if has_ref and has_unit:
+        return 1.0
+    if has_ref:
+        return 0.7
+    return 0.5
+
+
+def assign_confidence(items: List[Item]) -> None:
+    """Вычисляет и записывает confidence для каждого Item (in-place)."""
+    for it in items:
+        it.confidence = compute_item_confidence(it)
 
 
 ALIASES = {
@@ -1002,8 +1040,13 @@ def parse_with_fallback(raw_text: str) -> List[Item]:
     2. Оцениваем качество результатов через evaluate_parse_quality.
     3. Если (coverage_score < 0.6) ИЛИ (suspicious_count > 0):
        → запускаем fallback_generic
-       → выбираем результат с лучшим quality score.
+       → выбираем результат по приоритетам.
     4. Иначе используем baseline как есть.
+
+    Приоритеты сравнения (п.5 задачи):
+      1) suspicious_count == 0  (приоритет — чистота)
+      2) max valid_value_count  (больше распознанных)
+      3) max valid_ref_count    (больше референсов)
 
     ВАЖНО: baseline-логика НЕ изменяется. Fallback — отдельный модуль.
     """
@@ -1046,19 +1089,28 @@ def parse_with_fallback(raw_text: str) -> List[Item]:
     fallback_quality = evaluate_parse_quality(fallback_items)
     _dbg(f"parse_with_fallback: fallback quality={fallback_quality}")
 
-    # --- ШАГ 4: выбираем лучший ---
-    # Критерий: больше parsed, меньше suspicious, выше coverage
-    def _score(q: dict) -> float:
-        return q["parsed_count"] - q["suspicious_count"] * 5 - q["error_count"] * 2
+    # --- ШАГ 4: выбираем лучший по приоритетам ---
+    def _rank(q: dict) -> tuple:
+        """
+        Кортеж для сравнения (больше = лучше):
+          1) suspicious == 0 → True (1) предпочтительнее False (0)
+          2) valid_value_count — больше = лучше
+          3) valid_ref_count — больше = лучше
+        """
+        return (
+            1 if q["suspicious_count"] == 0 else 0,
+            q["valid_value_count"],
+            q["valid_ref_count"],
+        )
 
-    baseline_score = _score(baseline_quality)
-    fallback_score = _score(fallback_quality)
+    baseline_rank = _rank(baseline_quality)
+    fallback_rank = _rank(fallback_quality)
 
-    if fallback_score > baseline_score:
-        _dbg(f"parse_with_fallback: fallback wins (score {fallback_score} > {baseline_score})")
+    if fallback_rank > baseline_rank:
+        _dbg(f"parse_with_fallback: fallback wins (rank {fallback_rank} > {baseline_rank})")
         return fallback_items
     else:
-        _dbg(f"parse_with_fallback: baseline wins (score {baseline_score} >= {fallback_score})")
+        _dbg(f"parse_with_fallback: baseline wins (rank {baseline_rank} >= {fallback_rank})")
         return baseline_items
 
 
@@ -1713,6 +1765,18 @@ def generate_pdf_report(
     for it in items[:5]:  # Логируем первые 5 для отладки
         _dbg(f"  item: {it.name} value={it.value} ref={format_range(it.ref)} status={it.status}")
 
+    # === UNIVERSAL MODE: confidence + quality ===
+    from parsers.quality import evaluate_parse_quality
+
+    assign_confidence(items)
+    quality = evaluate_parse_quality(items)
+    _dbg(f"quality: {quality}")
+
+    low_quality = (
+        quality["coverage_score"] < 0.6
+        or quality["suspicious_count"] > 0
+    )
+
     # Определяем тип панели анализов по наличию маркеров
     parsed_names_before = {it.name for it in items}
     panel_scores = detect_panel(parsed_names_before)
@@ -1748,27 +1812,51 @@ def generate_pdf_report(
     items = drop_percent_if_absolute(items)
     _dbg(f"after drop_percent_if_absolute: {len(items)} items (проценты сохранены)")
 
-    # КРИТИЧНО: отклонения считаем только при наличии value+ref
+    # === БЕЗОПАСНЫЙ ОТБОР high_low: только confidence >= 0.7 ===
     high_low = [
         it for it in items
-        if it.value is not None and it.ref is not None and it.status in ("ВЫШЕ", "НИЖЕ")
+        if it.confidence >= 0.7
+        and it.value is not None
+        and it.ref is not None
+        and it.status in ("ВЫШЕ", "НИЖЕ")
     ]
-    _dbg(f"high_low deviations: {len(high_low)} items")
+    _dbg(f"high_low deviations (confidence>=0.7): {len(high_low)} items")
     for it in high_low:
-        _dbg(f"  deviation: {it.name} value={it.value} ref={format_range(it.ref)} status={it.status}")
+        _dbg(f"  deviation: {it.name} value={it.value} ref={format_range(it.ref)} "
+             f"status={it.status} confidence={it.confidence}")
 
-    dict_expl = build_dict_explanations(high_low)
-    specialists = suggest_specialists(high_low)
+    # === ПОВЕДЕНИЕ ДЛЯ НЕИЗВЕСТНЫХ БЛАНКОВ ===
+    # Если valid_value_count < 5 — не вызываем LLM
+    if quality["valid_value_count"] < 5:
+        _dbg(f"valid_value_count={quality['valid_value_count']} < 5 → пропускаем LLM")
+        answer = (
+            "Не удалось надёжно распознать достаточное количество показателей "
+            "из документа. Попробуйте загрузить более чёткий файл/фото или "
+            "другой формат. Таблица ниже может содержать частично распознанные данные."
+        )
+        high_low = []  # не показываем факты
+    else:
+        dict_expl = build_dict_explanations(high_low)
+        specialists = suggest_specialists(high_low)
+        llm_prompt = build_llm_prompt(sex, age, high_low, dict_expl, specialists)
 
-    llm_prompt = build_llm_prompt(sex, age, high_low, dict_expl, specialists)
+        try:
+            token = get_iam_token()
+            answer = call_yandexgpt(token, llm_prompt)
+            answer = re.sub(r"\n{3,}", "\n\n", answer).strip()
+        except Exception as e:
+            _dbg(f"LLM failed: {e}")
+            answer = build_fallback_text(sex, age, items, high_low)
 
-    try:
-        token = get_iam_token()
-        answer = call_yandexgpt(token, llm_prompt)
-        answer = re.sub(r"\n{3,}", "\n\n", answer).strip()
-    except Exception as e:
-        _dbg(f"LLM failed: {e}")
-        answer = build_fallback_text(sex, age, items, high_low)
+    # === UNIVERSAL DISCLAIMER при низком качестве ===
+    if low_quality and quality["valid_value_count"] >= 5:
+        disclaimer_prefix = (
+            "⚠ Часть показателей не распознана надёжно из-за формата бланка/"
+            "качества документа. Ниже приведены только уверенно распознанные "
+            "результаты; некоторые отклонения могли не попасть в итог.\n\n"
+        )
+        answer = disclaimer_prefix + answer
+        _dbg("universal disclaimer prepended to answer")
 
     context = build_template_context(sex, age, items, high_low, answer, missing_warnings)
     # Используем созданный ранее created_at для контекста (если нужно обновить, можно использовать context["created_at"])

@@ -18,6 +18,7 @@ from engine import (
     helix_table_to_candidates,
     parse_items_from_candidates,
     parse_with_fallback,
+    assign_confidence,
 )
 from parsers.quality import evaluate_parse_quality
 from parsers.fallback_generic import fallback_parse_candidates
@@ -51,7 +52,6 @@ class TestBaselineWithFallback:
 
     def test_fallback_import_does_not_break_baseline(self):
         """Импорт fallback-модуля не должен вызывать ошибок."""
-        # Если этот тест проходит, значит импорт fallback не сломал engine
         items = _extract_candidates()
         parsed = parse_items_from_candidates(items)
         assert len(parsed) >= 15
@@ -126,3 +126,29 @@ class TestBaselineWithFallback:
             f"suspicious_count != 0: {quality['suspicious_count']}"
         )
 
+    def test_baseline_confidence_all_high(self):
+        """
+        На Helix PDF все показатели должны иметь confidence >= 0.7,
+        т.к. у всех есть value, ref и unit.
+        """
+        candidates = _extract_candidates()
+        items = parse_items_from_candidates(candidates)
+        assign_confidence(items)
+
+        low_conf = [it for it in items if it.confidence < 0.7]
+        assert len(low_conf) == 0, (
+            f"Обнаружены показатели с низким confidence: "
+            f"{[(it.name, it.confidence) for it in low_conf]}"
+        )
+
+    def test_quality_has_new_metrics(self):
+        """Проверяем что quality содержит новые метрики."""
+        candidates = _extract_candidates()
+        items = parse_items_from_candidates(candidates)
+        quality = evaluate_parse_quality(items)
+
+        assert "valid_value_count" in quality
+        assert "valid_ref_count" in quality
+        assert "expected_minimum" in quality
+        assert quality["valid_value_count"] >= 15
+        assert quality["valid_ref_count"] >= 15
