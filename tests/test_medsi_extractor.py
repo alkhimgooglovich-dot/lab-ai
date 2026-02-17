@@ -340,3 +340,6 @@ class TestSmartCandidates:
         # Результат может быть пустым (short text), но ошибки быть не должно
         assert isinstance(candidates, str)
 
+
+
+

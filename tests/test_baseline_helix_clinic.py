@@ -179,3 +179,6 @@ class TestBaselineHelixClinic:
                 f"{name}: ожидали {expected['value']}, получили {it.value}"
             )
 
+
+
+

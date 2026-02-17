@@ -152,3 +152,45 @@ class TestBaselineWithFallback:
         assert "expected_minimum" in quality
         assert quality["valid_value_count"] >= 15
         assert quality["valid_ref_count"] >= 15
+
+    def test_quality_has_extended_metrics(self):
+        """Проверяем что quality содержит расширенные метрики v2."""
+        candidates = _extract_candidates()
+        items = parse_items_from_candidates(candidates)
+        quality = evaluate_parse_quality(items)
+
+        assert "ref_coverage_ratio" in quality
+        assert "unit_coverage_ratio" in quality
+        assert "duplicate_name_count" in quality
+        assert "avg_confidence" in quality
+        # На хорошем PDF ref_coverage_ratio и unit_coverage_ratio должны быть высокими
+        assert quality["ref_coverage_ratio"] >= 0.8
+        assert quality["unit_coverage_ratio"] >= 0.5
+
+    def test_universal_extractor_helix_regression(self):
+        """
+        Helix PDF даёт тот же результат через Universal Extractor.
+        """
+        from parsers.universal_extractor import universal_extract
+
+        pdf_bytes = TEST_PDF.read_bytes()
+        raw_text = try_extract_text_from_pdf_bytes(pdf_bytes)
+
+        # Universal Extractor
+        ue_candidates = universal_extract(raw_text)
+        ue_items = parse_items_from_candidates(ue_candidates) if ue_candidates else []
+
+        # Baseline (helix)
+        baseline_candidates = helix_table_to_candidates(raw_text)
+        baseline_items = parse_items_from_candidates(baseline_candidates)
+
+        def _find(items, name):
+            return next((it for it in items if it.name == name), None)
+
+        # Проверяем ключевые значения из Universal Extractor
+        for name, expected_val in EXPECTED_VALUES.items():
+            ue_item = _find(ue_items, name)
+            if ue_item is not None:
+                assert ue_item.value == expected_val, (
+                    f"{name}: universal={ue_item.value}, expected={expected_val}"
+                )

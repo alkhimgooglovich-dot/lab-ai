@@ -191,9 +191,9 @@ class TestConfidenceFiltering:
         )
         assert compute_item_confidence(it2) == 0.7
 
-        # value only, no ref → 0.5
+        # value only, no ref → 0.5  (имя >= 3 символов, чтобы не считалось мусором)
         it3 = Item(
-            raw_name="Y", name="Y", value=42.0, unit="мг/л",
+            raw_name="Калий", name="Калий", value=42.0, unit="мг/л",
             ref_text="", ref=None,
             ref_source="нет", status="НЕИЗВЕСТНО",
         )
@@ -278,4 +278,6 @@ class TestUnknownLabBehavior:
         ]
         quality2 = evaluate_parse_quality(many_items)
         assert quality2["expected_minimum"] == 15
+
+
 
