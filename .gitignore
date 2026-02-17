@@ -19,10 +19,9 @@ venv/
 *~
 
 # Outputs (генерируемые файлы)
-outputs/*.pdf
-outputs/*.html
-outputs/*.txt
-outputs/*.json
+# Outputs (генерируемые файлы)
+outputs/
+
 
 # Keys (секреты)
 Key/
@@ -30,4 +29,11 @@ Key/
 # OS
 Thumbs.db
 .DS_Store
+# Transfer bundles
+lab-ai_claude_transfer_pack/
+lab-ai_transfer_bundle.zip
+
+
+
+
 

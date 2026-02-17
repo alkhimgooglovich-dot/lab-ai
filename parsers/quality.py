@@ -8,10 +8,15 @@ evaluate_parse_quality(items) -> dict с метриками:
   - suspicious_count:  value содержит пробелы / '^' '*' '/' / ref+value склейка
   - coverage_score:    valid_value_count / expected_minimum
   - expected_minimum:  динамически: 15 (если >=8 CBC-кодов) иначе 8
+  - ref_coverage_ratio:  valid_ref_count / valid_value_count (доля с ref)
+  - unit_coverage_ratio: valid_unit_count / valid_value_count (доля с unit)
+  - duplicate_name_count: кол-во дублей по имени
+  - avg_confidence:       средний confidence (если поле задано)
 """
 
 import re
 from typing import List, Set, TYPE_CHECKING
+from collections import Counter
 
 if TYPE_CHECKING:
     from engine import Item
@@ -85,20 +90,27 @@ def evaluate_parse_quality(items: List["Item"], expected_minimum: int | None = N
 
     Returns:
         dict с ключами:
-            valid_value_count  — показатели, у которых value != None и не suspicious
-            valid_ref_count    — показатели с распознанным ref (ref is not None)
-            error_count        — показатели без значения (value is None)
-            suspicious_count   — показатели с подозрительными данными
-            coverage_score     — valid_value_count / expected_minimum (0..1+)
-            expected_minimum   — порог, использованный для расчёта
+            valid_value_count    — показатели, у которых value != None и не suspicious
+            valid_ref_count      — показатели с распознанным ref (ref is not None)
+            error_count          — показатели без значения (value is None)
+            suspicious_count     — показатели с подозрительными данными
+            coverage_score       — valid_value_count / expected_minimum (0..1+)
+            expected_minimum     — порог, использованный для расчёта
+            ref_coverage_ratio   — valid_ref_count / valid_value_count (0..1)
+            unit_coverage_ratio  — valid_unit_count / valid_value_count (0..1)
+            duplicate_name_count — кол-во имён, встречающихся >1 раза
+            avg_confidence       — средний confidence по валидным item
     """
     if expected_minimum is None:
         expected_minimum = _detect_expected_minimum(items)
 
     valid_value_count = 0
     valid_ref_count = 0
+    valid_unit_count = 0
     error_count = 0
     suspicious_count = 0
+    confidence_sum = 0.0
+    confidence_n = 0
 
     for it in items:
         # --- value отсутствует ---
@@ -115,8 +127,30 @@ def evaluate_parse_quality(items: List["Item"], expected_minimum: int | None = N
         valid_value_count += 1
         if it.ref is not None:
             valid_ref_count += 1
+        if (it.unit or "").strip():
+            valid_unit_count += 1
+
+        # confidence (может быть ещё не вычислен → 0.0 по умолчанию)
+        conf = getattr(it, "confidence", 0.0)
+        confidence_sum += conf
+        confidence_n += 1
 
     coverage_score = valid_value_count / max(expected_minimum, 1)
+
+    # Новые метрики
+    ref_coverage_ratio = (
+        valid_ref_count / valid_value_count if valid_value_count > 0 else 0.0
+    )
+    unit_coverage_ratio = (
+        valid_unit_count / valid_value_count if valid_value_count > 0 else 0.0
+    )
+    avg_confidence = (
+        confidence_sum / confidence_n if confidence_n > 0 else 0.0
+    )
+
+    # Подсчёт дублей по имени
+    name_counts = Counter(it.name for it in items if it.value is not None)
+    duplicate_name_count = sum(1 for cnt in name_counts.values() if cnt > 1)
 
     return {
         "valid_value_count": valid_value_count,
@@ -125,4 +159,8 @@ def evaluate_parse_quality(items: List["Item"], expected_minimum: int | None = N
         "suspicious_count": suspicious_count,
         "coverage_score": round(coverage_score, 3),
         "expected_minimum": expected_minimum,
+        "ref_coverage_ratio": round(ref_coverage_ratio, 3),
+        "unit_coverage_ratio": round(unit_coverage_ratio, 3),
+        "duplicate_name_count": duplicate_name_count,
+        "avg_confidence": round(avg_confidence, 3),
     }

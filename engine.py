@@ -330,9 +330,12 @@ class Item:
 def compute_item_confidence(it: Item) -> float:
     """
     Расчёт confidence для одного показателя:
-      1.0 — value валидное + ref валиден + unit не пустой
-      0.7 — value валидное + ref валиден, unit пустой
+      1.0 — value + ref + unit + известный биомаркер
+      0.9 — value + ref + unit (без проверки биомаркера)
+      0.8 — value + ref + известный биомаркер (без unit)
+      0.7 — value + ref, без unit и биомаркера
       0.5 — value валидное, но ref отсутствует
+      0.3 — value есть, но raw_name подозрительный (короткий / мусорный)
       0.0 — value подозрительное / None
     """
     if it.value is None:
@@ -348,10 +351,26 @@ def compute_item_confidence(it: Item) -> float:
     has_ref = it.ref is not None
     has_unit = bool((it.unit or "").strip())
 
-    if has_ref and has_unit:
+    # Проверяем, является ли имя известным биомаркером
+    from parsers.line_scorer import has_known_biomarker
+    is_known = has_known_biomarker(it.raw_name or it.name)
+
+    if has_ref and has_unit and is_known:
         return 1.0
+    if has_ref and has_unit:
+        return 0.9
+    if has_ref and is_known:
+        return 0.8
     if has_ref:
         return 0.7
+    if is_known:
+        return 0.5
+
+    # value есть, но ни ref, ни биомаркер не определены
+    name_clean = (it.raw_name or "").strip()
+    if len(name_clean) < 3 or not re.search(r"[A-Za-zА-Яа-я]{2,}", name_clean):
+        return 0.3
+
     return 0.5
 
 
@@ -629,8 +648,8 @@ def _normalize_scientific_notation(s: str) -> str:
     s = s.replace("¹", "^1").replace("²", "^2").replace("³", "^3")
     s = s.replace("⁴", "^4").replace("⁵", "^5").replace("⁶", "^6")
     s = s.replace("⁷", "^7").replace("⁸", "^8").replace("⁹", "^9").replace("⁰", "^0")
-    # Варианты записи: 10~9, 10-9, 10*9 → 10^9
-    s = re.sub(r"10\s*[~*\-]\s*(\d+)", r"10^\1", s, flags=re.IGNORECASE)
+    # Варианты записи: 10~9, 10*9 → 10^9 (без -, чтобы не ломать рефы типа "10 - 40")
+    s = re.sub(r"10\s*[~*]\s*(\d+)", r"10^\1", s, flags=re.IGNORECASE)
     # Если уже есть 10^N - оставляем как есть
     return s
 
@@ -896,19 +915,31 @@ def _smart_to_candidates(raw_text: str) -> str:
     """
     Авто-детект формата лаборатории и преобразование в TSV-кандидаты.
 
-    Если текст похож на МЕДСИ → medsi_inline_to_candidates (отдельный модуль).
-    Иначе → helix_table_to_candidates (baseline, не меняем).
+    Порядок:
+      1. МЕДСИ — специальная обработка (склейки ref+value).
+      2. Universal Extractor — для всех остальных.
+      3. Fallback: старый helix (на случай регрессии).
     """
     from parsers.medsi_extractor import is_medsi_format, medsi_inline_to_candidates
+    from parsers.universal_extractor import universal_extract
 
+    # МЕДСИ — специальная обработка (склейки ref+value)
     if is_medsi_format(raw_text):
         _dbg("_smart_to_candidates: detected MEDSI format")
         candidates = medsi_inline_to_candidates(raw_text)
         if candidates:
             _dbg(f"_smart_to_candidates: MEDSI → {len(candidates.splitlines())} candidates")
             return candidates
-        _dbg("_smart_to_candidates: MEDSI extractor empty, falling back to helix")
+        _dbg("_smart_to_candidates: MEDSI extractor empty, falling back")
 
+    # Universal Extractor — для всех остальных
+    candidates = universal_extract(raw_text)
+    if candidates:
+        _dbg(f"_smart_to_candidates: Universal → {len(candidates.splitlines())} candidates")
+        return candidates
+
+    # Fallback: старый helix (на случай регрессии)
+    _dbg("_smart_to_candidates: Universal empty, falling back to helix")
     return helix_table_to_candidates(raw_text)
 
 
@@ -1795,6 +1826,8 @@ def generate_pdf_report(
     low_quality = (
         quality["coverage_score"] < 0.6
         or quality["suspicious_count"] > 0
+        or quality.get("ref_coverage_ratio", 1.0) < 0.5
+        or quality.get("duplicate_name_count", 0) > 2
     )
 
     # Определяем тип панели анализов по наличию маркеров
