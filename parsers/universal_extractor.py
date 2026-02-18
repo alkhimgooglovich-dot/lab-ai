@@ -65,6 +65,11 @@ def _extract_ref_text(s: str) -> str:
         op = m.group(1).replace("≤", "<=").replace("≥", ">=")
         return f"{op}{m.group(2)}"
 
+    # Формат «до число» → «<число»
+    m = re.search(r"(?:^|\s)[Дд]о\s*(\d+(?:\.\d+)?)", t)
+    if m:
+        return f"<{m.group(1)}"
+
     return ""
 
 
@@ -114,6 +119,9 @@ def _try_parse_one_line(line: str) -> Optional[str]:
     comp_match = re.search(
         r"(<=|>=|<|>|≤|≥)\s*(-?\d+(?:[.,]\d+)?)", s_norm
     )
+    do_match = re.search(
+        r"[Дд]о\s*(\d+(?:[.,]\d+)?)", s_norm
+    )
 
     ref_span = None
     ref_text = ""
@@ -128,6 +136,10 @@ def _try_parse_one_line(line: str) -> Optional[str]:
         x = comp_match.group(2).replace(",", ".")
         ref_text = f"{op}{x}"
         ref_span = comp_match.span()
+    elif do_match:
+        x = do_match.group(1).replace(",", ".")
+        ref_text = f"<{x}"
+        ref_span = do_match.span()
     else:
         return None
 
@@ -194,7 +206,32 @@ def _try_parse_one_line(line: str) -> Optional[str]:
 
 
 # ──────────────────────────────────────────────
-# Pass 2: двухстрочный парсер
+# Вспомогательная функция: извлечение unit из строки-единицы
+# ──────────────────────────────────────────────
+def _extract_unit_from_line(s: str) -> str:
+    """
+    Извлекает единицу измерения из строки, которая содержит ТОЛЬКО unit.
+    Примеры: "г/л", "*10^9/л", "ммоль/л", "%"
+    Возвращает unit-строку или "".
+    """
+    t = (s or "").strip()
+    if not t or len(t) > 20:  # unit не может быть длиннее 20 символов
+        return ""
+    # Содержит числа (кроме *10^N) — не чистый unit
+    if has_numeric_value(t) and not re.match(r"^\*?10[\^*]\d+", t):
+        return ""
+    t_norm = _normalize_scientific_notation(t)
+    # Проверяем через unit_dictionary
+    if is_valid_unit(t_norm.strip(".,;:()")):
+        return t_norm
+    # Проверяем шаблоны: *10^N/л, г/л и т.д.
+    if re.match(r"^\*?10\s*\^\s*\d+/[а-яa-z]+$", t_norm, re.IGNORECASE):
+        return t_norm
+    return ""
+
+
+# ──────────────────────────────────────────────
+# Pass 2: парсер значений (общая вспомогательная)
 # ──────────────────────────────────────────────
 def _parse_value_unit_from_line(s: str) -> Tuple[Optional[float], str]:
     """Парсит значение и единицу из строки-значения."""
@@ -236,10 +273,98 @@ def _parse_value_unit_from_line(s: str) -> Tuple[Optional[float], str]:
     return val, unit
 
 
-def _two_line_pass(lines: List[str]) -> List[str]:
+def _multi_line_pass(lines: List[str]) -> List[str]:
     """
-    Pass 2: двухстрочный парсер.
+    Pass 2: многострочный парсер (скользящее окно до 4 строк).
+
+    Для каждой строки-имени собирает окно из следующих 1–3 строк
+    и ищет в нём компоненты: value, unit, ref (в произвольном порядке).
+
+    Возвращает список TSV-кандидатов: name\\tvalue\\tref\\tunit.
+    """
+    out: List[str] = []
+    i = 0
+
+    while i < len(lines):
+        ln = lines[i]
+
+        # Ищем строку-имя
+        if not _looks_like_name_line(ln):
+            i += 1
+            continue
+
+        # Нашли имя — собираем окно из следующих 1–3 строк
+        window = lines[i + 1: i + 4]  # максимум 3 строки после имени
+
+        value_found: Optional[float] = None
+        unit_found: str = ""
+        ref_found: str = ""
+        consumed: int = 0  # сколько строк из окна использовали
+
+        for j, w in enumerate(window):
+            w_stripped = (w or "").strip()
+            if not w_stripped:
+                continue  # пустая строка → пропуск
+
+            # Если строка — noise, но НЕ числовая → пропускаем (не ломаем окно)
+            if is_noise(w_stripped) and not re.match(r'^[↑↓+]?\s*\d', w_stripped):
+                continue
+
+            # Если встретили строку-имя, которая НЕ является единицей → СТОП
+            if _looks_like_name_line(w_stripped) and not _extract_unit_from_line(w_stripped):
+                break
+
+            # --- Компонент: value (+ возможно unit и ref в той же строке) ---
+            if value_found is None and _starts_like_value_line(w_stripped):
+                val, unit_candidate = _parse_value_unit_from_line(w_stripped)
+                if val is not None:
+                    value_found = val
+                    if unit_candidate:
+                        unit_found = unit_candidate
+                    # Ref тоже может быть на этой же строке (напр. "34.7 % 35.0 - 45.0")
+                    if not ref_found:
+                        ref_candidate = _extract_ref_text(w_stripped)
+                        if ref_candidate:
+                            ref_found = ref_candidate
+                    consumed = j + 1
+                    continue
+
+            # --- Компонент: ref ---
+            if not ref_found:
+                ref_candidate = _extract_ref_text(w_stripped)
+                if ref_candidate:
+                    ref_found = ref_candidate
+                    consumed = j + 1
+                    continue
+
+            # --- Компонент: unit (на отдельной строке) ---
+            if not unit_found:
+                unit_candidate = _extract_unit_from_line(w_stripped)
+                if unit_candidate:
+                    unit_found = unit_candidate
+                    consumed = j + 1
+                    continue
+
+            # Строка не дала ни одного компонента → СТОП
+            break
+
+        # Формируем кандидата: обязательны value + ref
+        if value_found is not None and ref_found:
+            candidate = f"{ln}\t{value_found:g}\t{ref_found}\t{unit_found}".strip()
+            out.append(candidate)
+            i += 1 + consumed  # перепрыгиваем использованные строки
+            continue
+
+        i += 1
+
+    return out
+
+
+def _two_line_pass_legacy(lines: List[str]) -> List[str]:
+    """
+    Pass 2 (LEGACY): двухстрочный парсер.
     Пары: строка-имя → строка-значение (возможно + следующая строка с ref).
+    Оставлен для возможности отката. Не вызывается.
     """
     out: List[str] = []
     pending_name: Optional[str] = None
@@ -349,12 +474,12 @@ def universal_extract(raw_text: str) -> str:
         if cand:
             one_line_cands.append(cand)
 
-    # ─── Pass 2: двухстрочный ───
-    two_line_cands = _two_line_pass(lines)
+    # ─── Pass 2: многострочный (окно 2–4 строки) ───
+    multi_line_cands = _multi_line_pass(lines)
 
     # ─── Слияние + дедупликация ───
-    # Двухстрочный приоритетнее (первым в списке)
-    merged = _dedup_candidates(two_line_cands + one_line_cands)
+    # Многострочный приоритетнее (первым в списке)
+    merged = _dedup_candidates(multi_line_cands + one_line_cands)
 
     return "\n".join(merged).strip()
 

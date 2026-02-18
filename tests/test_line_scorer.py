@@ -148,6 +148,13 @@ class TestPredicates:
         assert has_ref_pattern(">=1.0")
         assert not has_ref_pattern("просто текст")
 
+    def test_has_ref_pattern_do_format(self):
+        """Этап 3.1: паттерн «до число» распознаётся как референс."""
+        assert has_ref_pattern("до 5")
+        assert has_ref_pattern("до 5.0")
+        assert has_ref_pattern("До 10")
+        assert has_ref_pattern("до5")
+
     def test_has_known_unit(self):
         assert has_known_unit("г/л")
         assert has_known_unit("8.23 *10^9/л")

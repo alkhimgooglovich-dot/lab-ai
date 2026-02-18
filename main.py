@@ -170,6 +170,12 @@ def parse_ref_range(text: str) -> Optional[Range]:
     if not t:
         return None
     t = t.replace("—", "-").replace("–", "-").replace(",", ".")
+
+    # Канонизация «до X» → «<X» (до удаления пробелов!)
+    m_do = re.match(r"^[Дд]о\s*(\d+(?:\.\d+)?)$", t)
+    if m_do:
+        t = f"<{m_do.group(1)}"
+
     t = re.sub(r"\s+", "", t)
 
     m = re.match(r"^(<=|<|≤)(\d+(\.\d+)?)$", t)

@@ -80,7 +80,13 @@ def _is_suspicious_item(it: "Item") -> bool:
     return False
 
 
-def evaluate_parse_quality(items: List["Item"], expected_minimum: int | None = None) -> dict:
+def evaluate_parse_quality(
+    items: List["Item"],
+    expected_minimum: int | None = None,
+    *,
+    filtered_header_count: int | None = None,
+    dedup_dropped_count: int | None = None,
+) -> dict:
     """
     Оценивает качество результатов парсинга.
 
@@ -163,4 +169,6 @@ def evaluate_parse_quality(items: List["Item"], expected_minimum: int | None = N
         "unit_coverage_ratio": round(unit_coverage_ratio, 3),
         "duplicate_name_count": duplicate_name_count,
         "avg_confidence": round(avg_confidence, 3),
+        "filtered_header_count": filtered_header_count if filtered_header_count is not None else 0,
+        "duplicate_dropped_count": dedup_dropped_count if dedup_dropped_count is not None else 0,
     }
