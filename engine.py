@@ -492,12 +492,18 @@ def parse_float(x: str) -> Optional[float]:
 def parse_ref_range(text: str) -> Optional[Range]:
     """
     Парсит референсный диапазон из текста.
-    Поддерживает: "3.80-5.10", "150-400", "<=20", ">=5.0"
+    Поддерживает: "3.80-5.10", "150-400", "<=20", ">=5.0", "до 5"
     """
     t = (text or "").strip()
     if not t:
         return None
     t = t.replace("—", "-").replace("–", "-").replace(",", ".")
+
+    # Канонизация «до X» → «<X» (до удаления пробелов!)
+    m_do = re.match(r"^[Дд]о\s*(\d+(?:\.\d+)?)$", t)
+    if m_do:
+        t = f"<{m_do.group(1)}"
+
     # Удаляем пробелы, но оставляем дефис между числами
     t = re.sub(r"\s+", "", t)
     
@@ -582,6 +588,11 @@ def _extract_ref_text(s: str) -> str:
         op = m.group(1).replace("≤", "<=").replace("≥", ">=")
         return f"{op}{m.group(2)}"
 
+    # Формат «до число» → «<число»
+    m = re.search(r"(?:^|\s)[Дд]о\s*(\d+(?:\.\d+)?)", t)
+    if m:
+        return f"<{m.group(1)}"
+
     return ""
 
 
@@ -591,37 +602,9 @@ def _starts_like_value_line(s: str) -> bool:
 
 
 def _is_noise_line(low: str) -> bool:
-    bad_prefixes = (
-        "информация в интернете",
-        "лицензия",
-        "eqas",
-        "riqas",
-        "фсвок",
-        "iso",
-        "отчет создан",
-        "отчёт создан",
-        "страница",
-        "подтверждение",
-        "результаты анализов",
-        "интерпретацию полученных",
-        "* время указано",
-        "** референсные",
-        "метод и оборудование",
-        "общеклинический анализ",
-        "название/показатель",
-        "название показателя",
-        "референсные значения",
-        "global group",
-        "заказ №",
-        "заказ no",
-        "sgs",
-        "образец №",
-        "обазец №",
-        "зарегистрирован",
-        "валидация",
-        "место взятия",
-    )
-    return low.startswith(bad_prefixes)
+    """Делегирует проверку в is_noise() из line_scorer (единый источник правды)."""
+    from parsers.line_scorer import is_noise
+    return is_noise(low)
 
 
 def _looks_like_name_line(s: str) -> bool:
@@ -1115,6 +1098,10 @@ def parse_with_fallback(raw_text: str) -> List[Item]:
             return fallback_items
         return baseline_items  # пустой список
 
+    # --- ШАГ 1.5: дедупликация baseline ---
+    assign_confidence(baseline_items)
+    baseline_items, _ = deduplicate_items(baseline_items)
+
     # --- ШАГ 2: оцениваем качество baseline ---
     baseline_quality = evaluate_parse_quality(baseline_items)
     _dbg(f"parse_with_fallback: baseline quality={baseline_quality}")
@@ -1189,6 +1176,39 @@ def detect_panel(parsed_names: Set[str]) -> Dict[str, int]:
         "biochem": biochem_score,
         "lipids": lipids_score,
     }
+
+
+def deduplicate_items(items: List[Item]) -> List[Item]:
+    """
+    Дедупликация по canonical name (item.name).
+    Из дублей выбираем лучший по скорингу:
+      1) confidence (выше — лучше)
+      2) наличие ref (ref is not None — лучше)
+      3) наличие unit (unit непустой — лучше)
+    Остальные отбрасываем.
+
+    Возвращает (deduplicated_items, dropped_count).
+    """
+    from collections import defaultdict
+    groups: dict[str, list[Item]] = defaultdict(list)
+    for it in items:
+        groups[it.name].append(it)
+
+    result: List[Item] = []
+    dropped = 0
+    for name, group in groups.items():
+        if len(group) == 1:
+            result.append(group[0])
+            continue
+        # Сортируем: лучший первый
+        group.sort(key=lambda it: (
+            getattr(it, 'confidence', 0.0),
+            1 if it.ref is not None else 0,
+            1 if (it.unit or '').strip() else 0,
+        ), reverse=True)
+        result.append(group[0])
+        dropped += len(group) - 1
+    return result, dropped
 
 
 def drop_percent_if_absolute(items: List[Item]) -> List[Item]:
@@ -1820,7 +1840,9 @@ def generate_pdf_report(
     from parsers.quality import evaluate_parse_quality
 
     assign_confidence(items)
-    quality = evaluate_parse_quality(items)
+    items, dedup_dropped = deduplicate_items(items)
+    _dbg(f"deduplicate_items: dropped {dedup_dropped} duplicates, {len(items)} items remain")
+    quality = evaluate_parse_quality(items, dedup_dropped_count=dedup_dropped)
     _dbg(f"quality: {quality}")
 
     low_quality = (

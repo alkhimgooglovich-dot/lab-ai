@@ -120,11 +120,13 @@ def has_numeric_value(line: str) -> bool:
 
 
 def has_ref_pattern(line: str) -> bool:
-    """Содержит ли строка паттерн референса: число-число, <=N, >=N."""
+    """Содержит ли строка паттерн референса: число-число, <=N, >=N, до N."""
     s = (line or "").replace("–", "-").replace("—", "-")
     if re.search(r"\d+(?:[.,]\d+)?\s*-\s*\d+(?:[.,]\d+)?", s):
         return True
     if re.search(r"(<=|>=|<|>|≤|≥)\s*\d+(?:[.,]\d+)?", s):
+        return True
+    if re.search(r"(?:^|\s)[Дд]о\s*\d+(?:[.,]\d+)?", s):
         return True
     return False
 
@@ -169,6 +171,88 @@ def has_known_biomarker(line: str) -> bool:
     return False
 
 
+def is_header_service_line(line: str) -> bool:
+    """
+    Расширенная проверка «шапочных» / служебных строк PDF.
+    Такие строки не содержат лабораторных показателей и должны
+    отсеиваться на этапе фильтрации кандидатов.
+
+    Проверяемые категории:
+      - Телефон (+7 / 8-800 …)
+      - Email
+      - URL / сайт
+      - ИНН, ОГРН, КПП
+      - Адрес (г., ул., пр., д. …)
+      - Номер заказа / направления (№ NNNNN)
+      - Дата/время БЕЗ биомаркера
+      - QR / штрихкод (длинная цифровая строка > 12 цифр)
+      - ФИО пациента / врача (Иванов И.И.)
+    """
+    s = (line or "").strip()
+    if not s:
+        return False  # пустые строки обрабатывает is_noise()
+
+    low = s.lower()
+
+    # --- Телефон ---
+    if re.search(r"(\+7|8[\s\-]?\(?\d)[\d\s()\-]{7,}", s):
+        # Не фильтруем, если строка содержит биомаркер
+        if not has_known_biomarker(s):
+            return True
+
+    # --- Email ---
+    if re.search(r"[a-zA-Z0-9_.+\-]+@[a-zA-Z0-9\-]+\.[a-zA-Z]{2,}", s):
+        return True
+
+    # --- URL / сайт ---
+    if re.search(r"(https?://|www\.)", low):
+        return True
+
+    # --- ИНН ---
+    if re.search(r"инн\s*\d{10,12}", low):
+        return True
+
+    # --- ОГРН ---
+    if re.search(r"огрн\s*\d{13,15}", low):
+        return True
+
+    # --- КПП ---
+    if re.search(r"кпп\s*\d{9}", low):
+        return True
+
+    # --- Адрес ---
+    if re.match(r"^(г\.|ул\.|пр\.|д\.|корп\.|стр\.|пом\.)", low):
+        return True
+    if "адрес:" in low:
+        return True
+
+    # --- Номер заказа / направления (№ с 5+ цифрами) ---
+    if re.match(r"^№\s*\d{5,}", s):
+        return True
+
+    # --- Дата/время БЕЗ биомаркера ---
+    # Сначала проверяем строгие форматы «чистой даты» (вся строка — дата/время)
+    if re.match(r"^\d{4}-\d{2}-\d{2}(\s+\d{2}:\d{2}(:\d{2})?)?$", s):
+        return True
+    if re.match(r"^\d{2}\.\d{2}\.\d{4}(\s+\d{2}:\d{2}(:\d{2})?)?$", s):
+        return True
+    # Общая проверка: строка содержит дату, но не содержит биомаркер / единицу / реф
+    has_date = bool(re.search(r"\d{2}\.\d{2}\.\d{4}", s)) or bool(re.search(r"\d{4}-\d{2}-\d{2}", s))
+    if has_date and not has_known_biomarker(s):
+        if not has_known_unit(s) and not has_ref_pattern(s):
+            return True
+
+    # --- QR / штрихкод: только цифры, длина > 12 ---
+    if re.match(r"^\d{13,}$", s):
+        return True
+
+    # --- ФИО-формат: Иванов И.И. ---
+    if re.match(r"^[А-ЯЁ][а-яё]+\s+[А-ЯЁ]\.[А-ЯЁ]\.$", s):
+        return True
+
+    return False
+
+
 def is_noise(line: str) -> bool:
     """Является ли строка служебной / мусорной."""
     s = (line or "").strip()
@@ -187,6 +271,30 @@ def is_noise(line: str) -> bool:
         return True
     # Маркер страницы
     if re.match(r"^---\s*PAGE\s+\d+\s*---$", s, re.IGNORECASE):
+        return True
+    # Расширенная проверка шапочных / служебных строк
+    if is_header_service_line(s):
+        return True
+    return False
+
+
+def is_unit_only_line(line: str) -> bool:
+    """
+    Проверяет, является ли строка чистой единицей измерения.
+    Примеры: "г/л", "*10^9/л", "ммоль/л", "%"
+    """
+    s = (line or "").strip()
+    if not s or len(s) > 20:
+        return False
+    # Содержит числа (кроме *10^N) — не чистый unit
+    if has_numeric_value(s) and not re.match(r"^\*?10[\^*]\d+", s):
+        return False
+    # Проверяем через unit_dictionary
+    s_clean = s.strip(".,;:()")
+    if s_clean and is_valid_unit(s_clean):
+        return True
+    # Проверяем шаблоны: *10^N/л
+    if re.match(r"^\*?10\s*[\^*]\s*\d+/[а-яa-z]+$", s, re.IGNORECASE):
         return True
     return False
 

@@ -59,20 +59,24 @@ class TestBaselineWithFallback:
     def test_parse_with_fallback_returns_baseline_result(self):
         """
         На Helix PDF parse_with_fallback должен вернуть
-        тот же результат, что и чистый baseline.
+        тот же результат, что и чистый baseline (с учётом дедупликации).
         """
         candidates = _extract_candidates()
 
         # Чистый baseline
         baseline_items = parse_items_from_candidates(candidates)
 
-        # Через fallback-оркестратор
+        # Через fallback-оркестратор (включает дедупликацию)
         fallback_items = parse_with_fallback(candidates)
 
-        # Количество не должно быть хуже
-        assert len(fallback_items) >= len(baseline_items), (
-            f"parse_with_fallback вернул меньше показателей: "
-            f"{len(fallback_items)} < {len(baseline_items)}"
+        # Уникальные canonical name в baseline
+        baseline_unique = {it.name for it in baseline_items}
+
+        # Количество уникальных имён не должно уменьшиться
+        fallback_unique = {it.name for it in fallback_items}
+        assert len(fallback_unique) >= len(baseline_unique), (
+            f"parse_with_fallback потерял уникальные показатели: "
+            f"{len(fallback_unique)} < {len(baseline_unique)}"
         )
 
         # Проверяем ключевые значения

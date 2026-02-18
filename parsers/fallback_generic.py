@@ -89,7 +89,9 @@ def fallback_parse_line(line: str) -> Optional[Tuple[str, float, str, str, str]]
     if not re.search(r"\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?", s):
         # Или формат <=/>= (более редкий)
         if not re.search(r"(<=|>=|<|>)\s*\d+", s):
-            return None
+            # Или формат «до число»
+            if not re.search(r"[Дд]о\s*\d+", s):
+                return None
 
     # Ищем первое число в строке — это начало данных (после имени)
     num_match = re.search(r"(?<![A-Za-zА-Яа-я\-])([-+]?\d+(?:[.,]\d+)?)\s", s)
