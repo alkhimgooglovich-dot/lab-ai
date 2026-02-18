@@ -531,3 +531,4 @@ class TestGoldenCase12HelixPDFRegression:
         assert quality["suspicious_count"] == 0
 
 
+

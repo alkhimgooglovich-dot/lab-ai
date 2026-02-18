@@ -144,3 +144,4 @@ class TestHeaderServiceLineFiltering:
         """Короткие цифровые строки (< 13 цифр) не считаются штрихкодами."""
         assert not is_header_service_line("123456")
 
+

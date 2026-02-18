@@ -1211,6 +1211,29 @@ def deduplicate_items(items: List[Item]) -> List[Item]:
     return result, dropped
 
 
+def apply_sanity_filter(items: List[Item]) -> tuple[List[Item], int]:
+    """
+    Применяет sanity-фильтр к списку Item.
+
+    - Для известных canonical показателей: выбрасывает очевидный OCR-мусор.
+    - Для неизвестных: оставляет как есть.
+
+    Returns:
+        (filtered_items, outlier_count)
+    """
+    from parsers.sanity_ranges import is_sanity_outlier
+
+    kept = []
+    outlier_count = 0
+    for it in items:
+        if it.value is not None and is_sanity_outlier(it.name, it.value):
+            _dbg(f"sanity_outlier: {it.name}={it.value} → отброшен")
+            outlier_count += 1
+        else:
+            kept.append(it)
+    return kept, outlier_count
+
+
 def drop_percent_if_absolute(items: List[Item]) -> List[Item]:
     """
     ОТКЛЮЧЕНО: для лейкоформулы проценты и абсолютные значения - это разные показатели,
@@ -1842,7 +1865,12 @@ def generate_pdf_report(
     assign_confidence(items)
     items, dedup_dropped = deduplicate_items(items)
     _dbg(f"deduplicate_items: dropped {dedup_dropped} duplicates, {len(items)} items remain")
-    quality = evaluate_parse_quality(items, dedup_dropped_count=dedup_dropped)
+
+    # === SANITY FILTER (Этап 4.2) ===
+    items, outlier_count = apply_sanity_filter(items)
+    _dbg(f"apply_sanity_filter: отброшено {outlier_count} outliers, {len(items)} items remain")
+
+    quality = evaluate_parse_quality(items, dedup_dropped_count=dedup_dropped, sanity_outlier_count=outlier_count)
     _dbg(f"quality: {quality}")
 
     low_quality = (

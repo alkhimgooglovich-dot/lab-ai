@@ -545,3 +545,4 @@ class TestMultiLineNoRegression:
         quality = evaluate_parse_quality(items)
         assert quality["suspicious_count"] == 0
 
+

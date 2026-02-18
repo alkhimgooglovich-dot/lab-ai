@@ -86,6 +86,7 @@ def evaluate_parse_quality(
     *,
     filtered_header_count: int | None = None,
     dedup_dropped_count: int | None = None,
+    sanity_outlier_count: int | None = None,
 ) -> dict:
     """
     Оценивает качество результатов парсинга.
@@ -171,4 +172,5 @@ def evaluate_parse_quality(
         "avg_confidence": round(avg_confidence, 3),
         "filtered_header_count": filtered_header_count if filtered_header_count is not None else 0,
         "duplicate_dropped_count": dedup_dropped_count if dedup_dropped_count is not None else 0,
+        "sanity_outlier_count": sanity_outlier_count if sanity_outlier_count is not None else 0,
     }
