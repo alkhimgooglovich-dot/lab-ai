@@ -21,6 +21,11 @@ venv/
 # Outputs (генерируемые файлы)
 # Outputs (генерируемые файлы)
 outputs/
+tests/fixtures/*.pdf
+*.pdf
+*.jpg
+*.jpeg
+*.png
 
 
 # Keys (секреты)
