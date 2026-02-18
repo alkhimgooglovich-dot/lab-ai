@@ -24,6 +24,8 @@ from playwright.sync_api import sync_playwright
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
+from ocr_preprocess import preprocess_image_bytes
+
 
 # ==========================
 # ПАПКИ / ФАЙЛЫ
@@ -95,6 +97,9 @@ OCR_LANGS = ["*"]
 OCR_PDF_OPERATION_WAIT_SEC = 180   # чтобы не висеть бесконечно
 OCR_GET_RECOGNITION_WAIT_SEC = 180
 OPERATIONS_API_BASE = "https://operation.api.cloud.yandex.net/operations"
+
+# Preprocessing изображений перед OCR
+OCR_PREPROCESS_ENABLED = True
 
 
 # ==========================
@@ -1772,14 +1777,27 @@ def extract_text_from_upload(file_bytes: bytes, filename: str, mimetype: str) ->
         return ""
 
     # ---------- Images ----------
+    # Определяем MIME для OCR
     if mimetype in ("image/jpeg", "image/jpg") or name.endswith((".jpg", ".jpeg")):
-        ocr = ocr_image_sync(iam, file_bytes, "image/jpeg")
+        ocr_mime = "image/jpeg"
     elif mimetype == "image/png" or name.endswith(".png"):
-        ocr = ocr_image_sync(iam, file_bytes, "image/png")
+        ocr_mime = "image/png"
     elif mimetype == "image/webp" or name.endswith(".webp"):
-        ocr = ocr_image_sync(iam, file_bytes, "image/webp")
+        ocr_mime = "image/webp"
     else:
         raise RuntimeError(f"Неподдерживаемый тип: {mimetype} / {filename}")
+
+    # Preprocessing (если включён)
+    ocr_bytes = file_bytes
+    if OCR_PREPROCESS_ENABLED:
+        try:
+            ocr_bytes, ocr_mime = preprocess_image_bytes(file_bytes, ocr_mime)
+            _dbg(f"Preprocess OK: {len(file_bytes)}→{len(ocr_bytes)} bytes, mime={ocr_mime}")
+        except Exception as e:
+            _dbg(f"Preprocess failed (using original): {e}")
+            ocr_bytes = file_bytes  # fallback на оригинал
+
+    ocr = ocr_image_sync(iam, ocr_bytes, ocr_mime)
 
     OCR_RAW_PATH.write_text(json.dumps(ocr, ensure_ascii=False, indent=2), encoding="utf-8")
     plain = ocr_result_to_plaintext(ocr)

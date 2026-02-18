@@ -37,6 +37,20 @@ Thumbs.db
 # Transfer bundles
 lab-ai_claude_transfer_pack/
 lab-ai_transfer_bundle.zip
+claude_upload/
+lab-ai_claude_bundle_*.zip
+make_claude_bundle.ps1
+make_claude_upload.ps1
+claude_patch*.patch
+# Claude helper artifacts (do not commit)
+claude_upload/
+lab-ai_claude_bundle_*.zip
+claude_patch*.patch
+
+# Local helper scripts (optional)
+make_claude_bundle.ps1
+make_claude_upload.ps1
+
 
 
 
