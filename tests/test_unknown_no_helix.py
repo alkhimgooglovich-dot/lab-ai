@@ -52,3 +52,4 @@ class TestUnknownNeverCallsHelix:
             _smart_to_candidates(helix_text)
             mock_helix.assert_called_once()
 
+

@@ -1,21 +1,20 @@
 """
-Детектор формата лаборатории.
+Детектор формата лаборатории (data-driven).
 
 detect_lab(text) → LabDetectionResult
+detect_lab_format(text) → str  (legacy-обёртка)
 
-Поддерживаемые лаборатории:
-  - MEDSI    — МЕДСИ (inline ref+value, через is_medsi_format)
-  - HELIX    — Хеликс (двухстрочный, табуляции, доменные сигнатуры)
-  - INVITRO  — Инвитро (домен invitro.ru, ключевые фразы бланка)
-  - UNKNOWN  — все остальные → universal extractor
+Поддерживаемые лаборатории определяются конфигом в parsers/lab_signatures.py.
+Добавление новой лаборатории = одна запись в LAB_SIGNATURES.
 """
 
-from dataclasses import dataclass
-from enum import Enum
-from typing import List, Tuple
 import re
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import List
 
 
+# ─── Enum типов лабораторий ───
 class LabType(Enum):
     HELIX = "helix"
     MEDSI = "medsi"
@@ -23,175 +22,135 @@ class LabType(Enum):
     UNKNOWN = "unknown"
 
 
+# ─── Результат детекции ───
 @dataclass
 class LabDetectionResult:
     lab_type: LabType
-    confidence: float          # 0.0 … 1.0
-    matched_signatures: list   # какие сигнатуры сработали (для отладки)
+    confidence: float = 0.0
+    matched_signatures: List[str] = field(default_factory=list)
 
 
-# ─── Сигнатуры ───
-
-# МЕДСИ: домены, ключевые слова, шаблоны кодов
-_MEDSI_DOMAINS = ["medsi.ru", "мeдси", "МЕДСИ", "Медси"]
-_MEDSI_CODE_RE = re.compile(r"^\s*\([A-Za-zА-Яа-я\-#%0-9]+\)\s")
-
-# HELIX: домены, ключевые слова, паттерны таблиц
-_HELIX_DOMAINS = ["helix.ru", "хеликс", "Хеликс", "HELIX", "Helix"]
-_HELIX_HEADER_RE = re.compile(
-    r"(Исследование|Тест)\s*\t\s*Результат"
-)
-
-# INVITRO: домены, ключевые слова
-_INVITRO_SIGNATURES: list[str] = [
-    "invitro",
-    "инвитро",
-    "ООО «ИНВИТРО»",
-    "invitro.ru",
-    "www.invitro.ru",
-    "Независимая лаборатория ИНВИТРО",
-]
+# Алиас обратной совместимости (из патча)
+DetectResult = LabDetectionResult
 
 
-def _text_has_signature(text_lower: str, signatures: list[str]) -> bool:
-    """Проверяет, содержит ли текст хотя бы одну сигнатуру (регистронезависимо)."""
-    return any(sig.lower() in text_lower for sig in signatures)
+# ─── Вспомогательные функции для callable-сигнатур ───
+
+def _check_medsi_format(text: str) -> bool:
+    """Делегирует в medsi_extractor.is_medsi_format."""
+    from parsers.medsi_extractor import is_medsi_format
+    return is_medsi_format(text)
 
 
 def _count_medsi_code_lines(text: str) -> int:
-    """Считает строки, начинающиеся с (CODE) — маркер МЕДСИ."""
-    return sum(1 for line in text.splitlines() if _MEDSI_CODE_RE.match(line))
+    """Считает строки (CODE) — маркер МЕДСИ."""
+    return sum(1 for line in text.splitlines()
+               if re.match(r'^\(\w+\)', line.strip()))
 
 
 def _count_helix_pairs(text: str) -> int:
-    """Считает двухстрочные пары Helix: имя → число."""
+    """Считает двухстрочные пары имя→значение (маркер Helix)."""
     lines = text.splitlines()
     count = 0
     for i in range(len(lines) - 1):
         name_line = lines[i].strip()
         val_line = lines[i + 1].strip()
-        if (
-            name_line
-            and re.search(r"[A-Za-zА-Яа-я]{3,}", name_line)
-            and not re.match(r"^\d", name_line)
+        if (name_line
+            and re.search(r'[A-Za-zА-Яа-я]{3,}', name_line)
+            and not re.match(r'^\d', name_line)
             and val_line
-            and re.match(r"^[↑↓+]?\s*\d", val_line)
-        ):
+            and re.match(r'^[↑↓+]?\s*\d', val_line)):
             count += 1
     return count
 
 
+# ─── Реестр callable-проверок ───
+_CALLABLE_CHECKS = {
+    "is_medsi_format": _check_medsi_format,
+    "helix_pairs": lambda text: _count_helix_pairs(text) >= 5,
+}
+
+
+# ─── Главная функция детекции (data-driven) ───
+
 def detect_lab(text: str) -> LabDetectionResult:
     """
-    Определяет формат лаборатории по тексту.
+    Data-driven детекция лаборатории.
 
-    Стратегия:
-      1. Проверяем сигнатуры (домен/название).
-      2. Проверяем структурные паттерны (коды, табуляции).
-      3. Считаем confidence по количеству совпавших сигнатур.
-      4. Возвращаем LabDetectionResult.
-
-    Порог: confidence >= 0.5 → считаем определённой.
+    Алгоритм:
+    1. Загружаем конфиг сигнатур из parsers.lab_signatures.LAB_SIGNATURES
+    2. Для каждой лаборатории суммируем веса совпавших сигнатур
+    3. confidence = min(raw_score, 1.0)
+    4. Выбираем лабораторию с максимальным raw_score
+    5. Если confidence < threshold → UNKNOWN
     """
     if not text or not text.strip():
-        return LabDetectionResult(
-            lab_type=LabType.UNKNOWN,
-            confidence=0.0,
-            matched_signatures=[]
-        )
+        return LabDetectionResult(LabType.UNKNOWN, confidence=0.0)
 
-    matches: List[Tuple[LabType, str, float]] = []
-    # (lab_type, описание_сигнатуры, вес)
+    from parsers.lab_signatures import LAB_SIGNATURES
 
     text_lower = text.lower()
 
-    # ─── МЕДСИ: доменные/именные сигнатуры ───
-    for sig in _MEDSI_DOMAINS:
-        if sig.lower() in text_lower:
-            matches.append((LabType.MEDSI, f"domain:{sig}", 0.5))
-            break  # одного домена достаточно
+    # Собираем score для каждой лаборатории
+    results = []  # list of (LabType, raw_score, confidence, matched_sigs, threshold)
 
-    # МЕДСИ: структурные — строки с (CODE)
-    medsi_code_count = _count_medsi_code_lines(text)
-    if medsi_code_count >= 5:
-        matches.append((LabType.MEDSI, f"code_lines:{medsi_code_count}", 0.5))
-    elif medsi_code_count >= 2:
-        matches.append((LabType.MEDSI, f"code_lines:{medsi_code_count}", 0.3))
+    for lab_config in LAB_SIGNATURES:
+        lab_type = lab_config["lab_type"]
+        threshold = lab_config["threshold"]
+        sigs = lab_config["signatures"]
 
-    # МЕДСИ: «10*9» + «10*12» одновременно
-    if "10*9" in text and "10*12" in text:
-        matches.append((LabType.MEDSI, "units:10*9+10*12", 0.3))
+        raw_score = 0.0
+        matched = []
 
-    # МЕДСИ: СОЭ + мм/час
-    if "СОЭ" in text and "мм/час" in text:
-        matches.append((LabType.MEDSI, "soe_mm_chas", 0.2))
+        for sig in sigs:
+            weight = sig["weight"]
 
-    # ─── HELIX: доменные/именные сигнатуры ───
-    for sig in _HELIX_DOMAINS:
-        if sig.lower() in text_lower:
-            matches.append((LabType.HELIX, f"domain:{sig}", 0.5))
-            break
+            is_callable = sig.get("callable", False)
+            is_regex = sig.get("regex", False)
+            pattern = sig["pattern"]
 
-    # HELIX: заголовок таблицы
-    for line in text.splitlines()[:30]:
-        if _HELIX_HEADER_RE.search(line):
-            matches.append((LabType.HELIX, "header:Исследование\\tРезультат", 0.5))
-            break
+            hit = False
 
-    # HELIX: двухстрочные пары
-    helix_pairs = _count_helix_pairs(text)
-    if helix_pairs >= 5:
-        matches.append((LabType.HELIX, f"pairs:{helix_pairs}", 0.5))
-    elif helix_pairs >= 3:
-        matches.append((LabType.HELIX, f"pairs:{helix_pairs}", 0.2))
+            if is_callable:
+                # Вызываем функцию из реестра
+                fn = _CALLABLE_CHECKS.get(pattern)
+                if fn:
+                    hit = fn(text)
+            elif is_regex:
+                min_count = sig.get("min_count", 1)
+                count = len(re.findall(pattern, text, re.MULTILINE | re.IGNORECASE))
+                hit = count >= min_count
+            else:
+                # Простой поиск подстроки (регистронезависимо)
+                hit = pattern.lower() in text_lower
 
-    # ─── INVITRO: доменные/именные сигнатуры ───
-    if _text_has_signature(text_lower, _INVITRO_SIGNATURES):
-        # Определяем, какие сигнатуры совпали (для отладки)
-        matched_invitro = [sig for sig in _INVITRO_SIGNATURES if sig.lower() in text_lower]
-        for sig in matched_invitro[:1]:  # одной достаточно
-            matches.append((LabType.INVITRO, f"signature:{sig}", 0.5))
+            if hit:
+                raw_score += weight
+                matched.append(f"{sig['kind']}:{pattern}")
 
-    # ─── Подсчёт confidence для каждого типа ───
-    if not matches:
-        return LabDetectionResult(
-            lab_type=LabType.UNKNOWN,
-            confidence=0.0,
-            matched_signatures=[]
-        )
+        # confidence = raw_score, capped at 1.0
+        confidence = min(raw_score, 1.0)
 
-    # Суммируем веса по типу
-    scores = {}
-    sigs_by_type = {}
-    for lab_type, sig_name, weight in matches:
-        scores[lab_type] = scores.get(lab_type, 0.0) + weight
-        sigs_by_type.setdefault(lab_type, []).append(sig_name)
+        results.append((lab_type, raw_score, confidence, matched, threshold))
 
-    # Выбираем тип с максимальным score
-    best_type = max(scores, key=scores.get)
-    raw_conf = scores[best_type]
-    confidence = min(raw_conf, 1.0)  # cap at 1.0
+    # Фильтруем: оставляем только тех, чей confidence >= threshold
+    valid = [(lt, rs, conf, m, th) for lt, rs, conf, m, th in results if conf >= th]
 
-    # Если confidence < 0.5 → UNKNOWN
-    if confidence < 0.5:
-        return LabDetectionResult(
-            lab_type=LabType.UNKNOWN,
-            confidence=confidence,
-            matched_signatures=sigs_by_type.get(best_type, [])
-        )
+    if not valid:
+        return LabDetectionResult(LabType.UNKNOWN, confidence=0.0)
+
+    # Выбираем лабораторию с максимальным raw_score (при равенстве — первая в конфиге)
+    valid.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    best = valid[0]
 
     return LabDetectionResult(
-        lab_type=best_type,
-        confidence=confidence,
-        matched_signatures=sigs_by_type[best_type]
+        lab_type=best[0],
+        confidence=best[2],
+        matched_signatures=best[3]
     )
 
 
-# ──── Обратная совместимость ────
-
-# Алиас для нового кода (Этап 5.2+)
-DetectResult = LabDetectionResult
-
+# ─── Legacy-обёртка (обратная совместимость) ───
 
 def detect_lab_format(raw_text: str) -> str:
     """

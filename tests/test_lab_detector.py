@@ -154,3 +154,4 @@ class TestFallbackInSmartCandidates:
         result = _smart_to_candidates(text)
         assert isinstance(result, str)
 
+

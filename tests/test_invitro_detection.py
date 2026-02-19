@@ -108,3 +108,4 @@ class TestLabTypeEnum:
         assert r.lab_type == LabType.INVITRO
         assert r.confidence == 0.9
 
+
