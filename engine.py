@@ -904,30 +904,44 @@ def _smart_to_candidates(raw_text: str) -> str:
     Авто-детект формата лаборатории и преобразование в TSV-кандидаты.
 
     Порядок:
-      1. МЕДСИ — специальная обработка (склейки ref+value).
-      2. Universal Extractor — для всех остальных.
-      3. Fallback: старый helix (на случай регрессии).
+      1. detect_lab → определяем лабораторию.
+      2. Если MEDSI → medsi_inline_to_candidates.
+      3. Если HELIX → helix_table_to_candidates.
+      4. Иначе → universal_extract.
+      5. FALLBACK: если спец-парсер вернул пустоту → universal_extract.
+      6. FALLBACK-2: если universal пуст → helix_table_to_candidates.
     """
-    from parsers.medsi_extractor import is_medsi_format, medsi_inline_to_candidates
+    from parsers.lab_detector import detect_lab, LabType
+    from parsers.medsi_extractor import medsi_inline_to_candidates
     from parsers.universal_extractor import universal_extract
 
-    # МЕДСИ — специальная обработка (склейки ref+value)
-    if is_medsi_format(raw_text):
-        _dbg("_smart_to_candidates: detected MEDSI format")
+    detection = detect_lab(raw_text)
+    _dbg(f"_smart_to_candidates: detect_lab → {detection.lab_type.value} "
+         f"(confidence={detection.confidence:.2f}, sigs={detection.matched_signatures})")
+
+    # ─── Спец-парсер по типу лаборатории ───
+    if detection.lab_type == LabType.MEDSI:
         candidates = medsi_inline_to_candidates(raw_text)
         if candidates:
             _dbg(f"_smart_to_candidates: MEDSI → {len(candidates.splitlines())} candidates")
             return candidates
-        _dbg("_smart_to_candidates: MEDSI extractor empty, falling back")
+        _dbg("_smart_to_candidates: MEDSI extractor empty → fallback to universal")
 
-    # Universal Extractor — для всех остальных
+    elif detection.lab_type == LabType.HELIX:
+        candidates = helix_table_to_candidates(raw_text)
+        if candidates:
+            _dbg(f"_smart_to_candidates: HELIX → {len(candidates.splitlines())} candidates")
+            return candidates
+        _dbg("_smart_to_candidates: HELIX extractor empty → fallback to universal")
+
+    # ─── Universal (основной или fallback) ───
     candidates = universal_extract(raw_text)
     if candidates:
         _dbg(f"_smart_to_candidates: Universal → {len(candidates.splitlines())} candidates")
         return candidates
 
-    # Fallback: старый helix (на случай регрессии)
-    _dbg("_smart_to_candidates: Universal empty, falling back to helix")
+    # ─── Fallback-2: helix на случай регрессии ───
+    _dbg("_smart_to_candidates: Universal empty → fallback to helix")
     return helix_table_to_candidates(raw_text)
 
 
