@@ -1914,6 +1914,22 @@ def generate_pdf_report(
     quality = evaluate_parse_quality(items, dedup_dropped_count=dedup_dropped, sanity_outlier_count=outlier_count)
     _dbg(f"quality: {quality}")
 
+    # === B1: МЕТРИКИ (только запись, без влияния на логику) ===
+    from parsers.metrics import compute_ocr_quality_metrics, compute_parse_metrics, compute_parse_score
+
+    _ocr_metrics = compute_ocr_quality_metrics(raw_text)
+    _parse_metrics = compute_parse_metrics(items, quality_dict=quality)
+    _parse_score = compute_parse_score(_ocr_metrics, _parse_metrics)
+
+    quality["metrics"] = {
+        "schema_version": "1.0",
+        "ocr": _ocr_metrics,
+        "parse": _parse_metrics,
+        "parse_score": _parse_score,
+    }
+    _dbg(f"metrics: score={_parse_score}, ocr_candidates={_ocr_metrics['numeric_candidates_count']}, "
+         f"parsed={_parse_metrics['parsed_items']}, valid={_parse_metrics['valid_value_count']}")
+
     low_quality = (
         quality["coverage_score"] < 0.6
         or quality["suspicious_count"] > 0
