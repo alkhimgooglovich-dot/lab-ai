@@ -904,11 +904,10 @@ def _smart_to_candidates(raw_text: str) -> str:
     Авто-детект формата лаборатории и преобразование в TSV-кандидаты.
 
     Порядок:
-      1. detect_lab → определяем лабораторию.
-      2. Если MEDSI → medsi_inline_to_candidates.
-      3. Если HELIX → helix_table_to_candidates.
+      1. МЕДСИ — специальная обработка (склейки ref+value).
+      2. HELIX → helix_table_to_candidates.
+      3. INVITRO → universal_extract (будущий invitro_parser).
       4. Иначе → universal_extract.
-      5. FALLBACK: если спец-парсер вернул пустоту → universal_extract.
 
     ВАЖНО: universal НЕ вызывает helix. UNKNOWN НЕ вызывает helix.
     """
@@ -916,26 +915,36 @@ def _smart_to_candidates(raw_text: str) -> str:
     from parsers.medsi_extractor import medsi_inline_to_candidates
     from parsers.universal_extractor import universal_extract
 
-    detection = detect_lab(raw_text)
-    _dbg(f"_smart_to_candidates: detect_lab → {detection.lab_type.value} "
-         f"(confidence={detection.confidence:.2f}, sigs={detection.matched_signatures})")
+    det = detect_lab(raw_text)
+    _dbg(f"_smart_to_candidates: detected {det.lab_type.value} "
+         f"(conf={det.confidence:.2f}, sigs={det.matched_signatures})")
 
-    # ─── Спец-парсер по типу лаборатории ───
-    if detection.lab_type == LabType.MEDSI:
+    # ─── МЕДСИ ───
+    if det.lab_type == LabType.MEDSI:
         candidates = medsi_inline_to_candidates(raw_text)
         if candidates:
             _dbg(f"_smart_to_candidates: MEDSI → {len(candidates.splitlines())} candidates")
             return candidates
-        _dbg("_smart_to_candidates: MEDSI extractor empty → fallback to universal")
+        _dbg("_smart_to_candidates: MEDSI extractor empty, falling back to universal")
 
-    elif detection.lab_type == LabType.HELIX:
+    # ─── HELIX ───
+    if det.lab_type == LabType.HELIX:
         candidates = helix_table_to_candidates(raw_text)
         if candidates:
             _dbg(f"_smart_to_candidates: HELIX → {len(candidates.splitlines())} candidates")
             return candidates
-        _dbg("_smart_to_candidates: HELIX extractor empty → fallback to universal")
+        _dbg("_smart_to_candidates: HELIX extractor empty, falling back to universal")
 
-    # ─── Universal (основной или fallback) ───
+    # ─── INVITRO (пока → universal, место для будущего invitro_parser) ───
+    if det.lab_type == LabType.INVITRO:
+        # TODO: заменить на invitro_parser, когда будет готов
+        candidates = universal_extract(raw_text)
+        if candidates:
+            _dbg(f"_smart_to_candidates: INVITRO (universal) → {len(candidates.splitlines())} candidates")
+            return candidates
+        _dbg("_smart_to_candidates: INVITRO (universal) empty")
+
+    # ─── UNKNOWN / fallback ───
     candidates = universal_extract(raw_text)
     if candidates:
         _dbg(f"_smart_to_candidates: Universal → {len(candidates.splitlines())} candidates")

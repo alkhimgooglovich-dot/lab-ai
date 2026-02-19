@@ -3,10 +3,11 @@
 
 detect_lab(text) → LabDetectionResult
 
-Поддерживаемые форматы:
-  - HELIX  — Хеликс / ИнВитро (двухстрочный, табуляции)
-  - MEDSI  — МЕДСИ (inline ref+value)
-  - UNKNOWN — все остальные → universal extractor
+Поддерживаемые лаборатории:
+  - MEDSI    — МЕДСИ (inline ref+value, через is_medsi_format)
+  - HELIX    — Хеликс (двухстрочный, табуляции, доменные сигнатуры)
+  - INVITRO  — Инвитро (домен invitro.ru, ключевые фразы бланка)
+  - UNKNOWN  — все остальные → universal extractor
 """
 
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ import re
 class LabType(Enum):
     HELIX = "helix"
     MEDSI = "medsi"
+    INVITRO = "invitro"
     UNKNOWN = "unknown"
 
 
@@ -39,6 +41,21 @@ _HELIX_DOMAINS = ["helix.ru", "хеликс", "Хеликс", "HELIX", "Helix"]
 _HELIX_HEADER_RE = re.compile(
     r"(Исследование|Тест)\s*\t\s*Результат"
 )
+
+# INVITRO: домены, ключевые слова
+_INVITRO_SIGNATURES: list[str] = [
+    "invitro",
+    "инвитро",
+    "ООО «ИНВИТРО»",
+    "invitro.ru",
+    "www.invitro.ru",
+    "Независимая лаборатория ИНВИТРО",
+]
+
+
+def _text_has_signature(text_lower: str, signatures: list[str]) -> bool:
+    """Проверяет, содержит ли текст хотя бы одну сигнатуру (регистронезависимо)."""
+    return any(sig.lower() in text_lower for sig in signatures)
 
 
 def _count_medsi_code_lines(text: str) -> int:
@@ -128,6 +145,13 @@ def detect_lab(text: str) -> LabDetectionResult:
     elif helix_pairs >= 3:
         matches.append((LabType.HELIX, f"pairs:{helix_pairs}", 0.2))
 
+    # ─── INVITRO: доменные/именные сигнатуры ───
+    if _text_has_signature(text_lower, _INVITRO_SIGNATURES):
+        # Определяем, какие сигнатуры совпали (для отладки)
+        matched_invitro = [sig for sig in _INVITRO_SIGNATURES if sig.lower() in text_lower]
+        for sig in matched_invitro[:1]:  # одной достаточно
+            matches.append((LabType.INVITRO, f"signature:{sig}", 0.5))
+
     # ─── Подсчёт confidence для каждого типа ───
     if not matches:
         return LabDetectionResult(
@@ -161,3 +185,24 @@ def detect_lab(text: str) -> LabDetectionResult:
         confidence=confidence,
         matched_signatures=sigs_by_type[best_type]
     )
+
+
+# ──── Обратная совместимость ────
+
+# Алиас для нового кода (Этап 5.2+)
+DetectResult = LabDetectionResult
+
+
+def detect_lab_format(raw_text: str) -> str:
+    """
+    Legacy-обёртка. Возвращает строку для старого кода.
+    'medsi' | 'helix' | 'generic'
+    """
+    result = detect_lab(raw_text)
+    mapping = {
+        LabType.MEDSI:   "medsi",
+        LabType.HELIX:   "helix",
+        LabType.INVITRO: "generic",   # пока нет отдельного парсера
+        LabType.UNKNOWN: "generic",
+    }
+    return mapping.get(result.lab_type, "generic")
