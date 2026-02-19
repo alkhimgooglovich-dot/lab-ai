@@ -63,6 +63,11 @@ IAM_JWT_ALG = "PS256"
 # ==========================
 WARN_PCT = 10.0
 
+# ==========================
+# B2: OCR RERUN ПОРОГИ
+# ==========================
+OCR_RERUN_MIN_SCORE = 45.0   # parse_score ниже этого → делаем rerun OCR
+
 
 # ==========================
 # НАСТРОЙКИ YandexGPT
@@ -1717,7 +1722,15 @@ def try_extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
 # ==========================
 # EXTRACT: Upload -> candidates/plain
 # ==========================
-def extract_text_from_upload(file_bytes: bytes, filename: str, mimetype: str) -> str:
+def extract_text_from_upload(
+    file_bytes: bytes,
+    filename: str,
+    mimetype: str,
+    *,
+    adaptive_threshold: bool = False,
+) -> str:
+    if adaptive_threshold:
+        _dbg("extract_text_from_upload: adaptive_threshold=True (B2 rerun mode)")
     iam = get_iam_token()
     name = (filename or "").lower()
 
@@ -1834,6 +1847,93 @@ def extract_text_from_upload(file_bytes: bytes, filename: str, mimetype: str) ->
 
 
 # ==========================
+# B2: вспомогательные функции для OCR rerun
+# ==========================
+def _run_parse_pipeline(raw_text: str):
+    """
+    B2-хелпер: парсинг raw_text → (items, quality, dedup_dropped, outlier_count).
+
+    Выполняет:
+      1) _smart_to_candidates (если нет табуляции)
+      2) parse_with_fallback
+      3) assign_confidence + deduplicate + sanity_filter
+      4) evaluate_parse_quality
+      5) compute metrics + parse_score
+
+    Возвращает (items, quality, dedup_dropped, outlier_count) или
+    (None, None, 0, 0) если парсинг дал 0 items.
+    """
+    from parsers.quality import evaluate_parse_quality
+    from parsers.metrics import compute_ocr_quality_metrics, compute_parse_metrics, compute_parse_score
+
+    text = raw_text
+    if "\t" not in text:
+        candidates = _smart_to_candidates(text)
+        if candidates:
+            text = candidates
+
+    items = parse_with_fallback(text)
+    if not items:
+        return None, None, 0, 0
+
+    assign_confidence(items)
+    items, dedup_dropped = deduplicate_items(items)
+    items, outlier_count = apply_sanity_filter(items)
+
+    quality = evaluate_parse_quality(
+        items,
+        dedup_dropped_count=dedup_dropped,
+        sanity_outlier_count=outlier_count,
+    )
+
+    # B1-метрики
+    _ocr_metrics = compute_ocr_quality_metrics(raw_text)
+    _parse_metrics = compute_parse_metrics(items, quality_dict=quality)
+    _parse_score = compute_parse_score(_ocr_metrics, _parse_metrics)
+
+    quality["metrics"] = {
+        "schema_version": "1.0",
+        "ocr": _ocr_metrics,
+        "parse": _parse_metrics,
+        "parse_score": _parse_score,
+    }
+
+    return items, quality, dedup_dropped, outlier_count
+
+
+def _is_rerun_better(quality_first: dict, quality_rerun: dict) -> bool:
+    """
+    B2: сравниваем два прогона. Выбираем rerun если:
+    1) parse_score rerun > parse_score first
+    2) tie-breaker 1: valid_value_count выше
+    3) tie-breaker 2: noise_line_ratio ниже
+    """
+    s1 = quality_first["metrics"]["parse_score"]
+    s2 = quality_rerun["metrics"]["parse_score"]
+
+    if s2 > s1:
+        return True
+    if s2 < s1:
+        return False
+
+    # tie-breaker 1: valid_value_count
+    v1 = quality_first.get("valid_value_count", 0)
+    v2 = quality_rerun.get("valid_value_count", 0)
+    if v2 > v1:
+        return True
+    if v2 < v1:
+        return False
+
+    # tie-breaker 2: noise_line_ratio (ниже = лучше)
+    n1 = quality_first["metrics"]["ocr"].get("noise_line_ratio", 0.0)
+    n2 = quality_rerun["metrics"]["ocr"].get("noise_line_ratio", 0.0)
+    if n2 < n1:
+        return True
+
+    return False
+
+
+# ==========================
 # PUBLIC: PDF отчёт
 # ==========================
 def generate_pdf_report(
@@ -1879,15 +1979,10 @@ def generate_pdf_report(
     if not raw_text:
         raise ValueError("Не удалось получить текст из файла. См. outputs/ocr_debug.txt")
 
-    # если это plain-текст — пытаемся собрать кандидатов
-    if "\t" not in raw_text:
-        candidates = _smart_to_candidates(raw_text)
-        if candidates:
-            raw_text = candidates
+    # === B2: ПЕРВЫЙ ПРОГОН ПАРСИНГА ===
+    items, quality, dedup_dropped, outlier_count = _run_parse_pipeline(raw_text)
 
-    # === BASELINE-FIRST + FALLBACK ===
-    items = parse_with_fallback(raw_text)
-    if not items:
+    if items is None:
         raise ValueError(
             "Не удалось собрать показатели.\n"
             "Проверьте:\n"
@@ -1897,38 +1992,62 @@ def generate_pdf_report(
         )
 
     _dbg(f"parse_with_fallback: итого {len(items)} items")
-    for it in items[:5]:  # Логируем первые 5 для отладки
+    for it in items[:5]:
         _dbg(f"  item: {it.name} value={it.value} ref={format_range(it.ref)} status={it.status}")
-
-    # === UNIVERSAL MODE: confidence + quality ===
-    from parsers.quality import evaluate_parse_quality
-
-    assign_confidence(items)
-    items, dedup_dropped = deduplicate_items(items)
-    _dbg(f"deduplicate_items: dropped {dedup_dropped} duplicates, {len(items)} items remain")
-
-    # === SANITY FILTER (Этап 4.2) ===
-    items, outlier_count = apply_sanity_filter(items)
-    _dbg(f"apply_sanity_filter: отброшено {outlier_count} outliers, {len(items)} items remain")
-
-    quality = evaluate_parse_quality(items, dedup_dropped_count=dedup_dropped, sanity_outlier_count=outlier_count)
     _dbg(f"quality: {quality}")
 
-    # === B1: МЕТРИКИ (только запись, без влияния на логику) ===
-    from parsers.metrics import compute_ocr_quality_metrics, compute_parse_metrics, compute_parse_score
-
-    _ocr_metrics = compute_ocr_quality_metrics(raw_text)
-    _parse_metrics = compute_parse_metrics(items, quality_dict=quality)
-    _parse_score = compute_parse_score(_ocr_metrics, _parse_metrics)
-
-    quality["metrics"] = {
-        "schema_version": "1.0",
-        "ocr": _ocr_metrics,
-        "parse": _parse_metrics,
-        "parse_score": _parse_score,
+    # === B2: OCR RERUN (макс. 1 раз) ===
+    rerun_info = {
+        "performed": False,
+        "reason": None,
+        "score_before": quality["metrics"]["parse_score"],
+        "score_after": quality["metrics"]["parse_score"],
+        "chosen": "first",
     }
-    _dbg(f"metrics: score={_parse_score}, ocr_candidates={_ocr_metrics['numeric_candidates_count']}, "
-         f"parsed={_parse_metrics['parsed_items']}, valid={_parse_metrics['valid_value_count']}")
+
+    first_parse_score = quality["metrics"]["parse_score"]
+
+    if first_parse_score < OCR_RERUN_MIN_SCORE and file_bytes:
+        _dbg(f"B2 rerun: parse_score={first_parse_score} < {OCR_RERUN_MIN_SCORE}, запускаем OCR rerun с adaptive_threshold")
+        rerun_info["performed"] = True
+        rerun_info["reason"] = "LOW_PARSE_SCORE"
+
+        try:
+            rerun_text = extract_text_from_upload(
+                file_bytes, filename=filename, mimetype=mimetype,
+                adaptive_threshold=True,
+            )
+            rerun_text = (rerun_text or "").strip()
+
+            if rerun_text:
+                items2, quality2, dd2, oc2 = _run_parse_pipeline(rerun_text)
+
+                if items2 is not None and quality2 is not None:
+                    rerun_score = quality2["metrics"]["parse_score"]
+                    rerun_info["score_after"] = rerun_score
+                    _dbg(f"B2 rerun: score_before={first_parse_score}, score_after={rerun_score}")
+
+                    # Выбираем лучший вариант
+                    if _is_rerun_better(quality, quality2):
+                        _dbg("B2 rerun: rerun ЛУЧШЕ → выбираем rerun")
+                        items = items2
+                        quality = quality2
+                        dedup_dropped = dd2
+                        outlier_count = oc2
+                        rerun_info["chosen"] = "rerun"
+                    else:
+                        _dbg("B2 rerun: rerun НЕ лучше → оставляем first")
+                else:
+                    _dbg("B2 rerun: rerun вернул пустые items, оставляем first")
+            else:
+                _dbg("B2 rerun: rerun text пуст, оставляем first")
+
+        except Exception as e:
+            _dbg(f"B2 rerun: ошибка при rerun OCR: {e}")
+
+    # Записываем rerun-диагностику в quality["metrics"]
+    quality["metrics"]["rerun"] = rerun_info
+    _dbg(f"B2 rerun info: {rerun_info}")
 
     low_quality = (
         quality["coverage_score"] < 0.6
