@@ -132,6 +132,149 @@ class TestPreprocessFlags:
         assert isinstance(result, bytes)
 
 
+class TestDeskew:
+    """Тесты deskew: определение и исправление наклона."""
+
+    def test_deskew_does_not_crash(self):
+        """Базовый: не падает на обычном изображении."""
+        raw = _make_test_image(800, 600)
+        result, mime = preprocess_image_bytes(raw, "image/jpeg", enable_deskew=True)
+        assert isinstance(result, bytes)
+        assert len(result) > 0
+        assert mime == "image/png"
+
+    def test_deskew_preserves_dimensions(self):
+        """Размеры изображения не меняются после deskew."""
+        raw = _make_test_image(800, 600)
+        result, _ = preprocess_image_bytes(
+            raw, "image/jpeg",
+            enable_deskew=True,
+            enable_upscale=False,  # выключаем upscale чтобы проверить только deskew
+        )
+        img = Image.open(io.BytesIO(result))
+        assert img.width == 800
+        assert img.height == 600
+
+    def test_deskew_on_grayscale(self):
+        """Deskew работает на grayscale изображении."""
+        raw = _make_grayscale_image(800, 600)
+        result, _ = preprocess_image_bytes(
+            raw, "image/png", enable_deskew=True
+        )
+        assert isinstance(result, bytes)
+        assert len(result) > 0
+
+    def test_deskew_disabled(self):
+        """Можно отключить deskew."""
+        raw = _make_test_image(800, 600)
+        result, _ = preprocess_image_bytes(
+            raw, "image/jpeg", enable_deskew=False
+        )
+        assert isinstance(result, bytes)
+
+    def test_deskew_on_rotated_image(self):
+        """Deskew корректно обрабатывает наклонное изображение (не падает)."""
+        # Создаём изображение с наклонными линиями
+        img = Image.new("RGB", (800, 600), color=(255, 255, 255))
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(img)
+        # Рисуем наклонные линии (имитация текста под углом ~5°)
+        for y in range(100, 500, 40):
+            x_offset = int(y * 0.087)  # tan(5°) ≈ 0.087
+            draw.line([(50 + x_offset, y), (750 + x_offset, y + 5)], fill=(0, 0, 0), width=2)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        raw = buf.getvalue()
+
+        result, _ = preprocess_image_bytes(raw, "image/jpeg", enable_deskew=True)
+        assert isinstance(result, bytes)
+        assert len(result) > 0
+
+    def test_deskew_output_format_png(self):
+        """Результат после deskew всё ещё PNG."""
+        raw = _make_test_image(800, 600)
+        result, mime = preprocess_image_bytes(raw, "image/jpeg", enable_deskew=True)
+        img = Image.open(io.BytesIO(result))
+        assert img.format == "PNG"
+        assert mime == "image/png"
+
+
+class TestAdaptiveThreshold:
+    """Тесты adaptive threshold."""
+
+    def test_threshold_does_not_crash(self):
+        """Базовый: не падает."""
+        raw = _make_test_image(800, 600)
+        result, mime = preprocess_image_bytes(
+            raw, "image/jpeg", enable_adaptive_threshold=True
+        )
+        assert isinstance(result, bytes)
+        assert len(result) > 0
+        assert mime == "image/png"
+
+    def test_threshold_preserves_dimensions(self):
+        """Размеры не меняются."""
+        raw = _make_test_image(800, 600)
+        result, _ = preprocess_image_bytes(
+            raw, "image/jpeg",
+            enable_adaptive_threshold=True,
+            enable_upscale=False,
+        )
+        img = Image.open(io.BytesIO(result))
+        assert img.width == 800
+        assert img.height == 600
+
+    def test_threshold_output_is_binary(self):
+        """Результат бинаризации содержит только чёрный и белый."""
+        raw = _make_test_image(800, 600)
+        result, _ = preprocess_image_bytes(
+            raw, "image/jpeg",
+            enable_adaptive_threshold=True,
+            enable_upscale=False,
+        )
+        img = Image.open(io.BytesIO(result))
+        import numpy as np
+        arr = np.array(img)
+        unique = set(np.unique(arr))
+        assert unique.issubset({0, 255}), f"Expected binary, got values: {unique}"
+
+    def test_threshold_disabled_by_default(self):
+        """По умолчанию adaptive threshold выключен."""
+        raw = _make_test_image(800, 600)
+        result, _ = preprocess_image_bytes(raw, "image/jpeg")
+        img = Image.open(io.BytesIO(result))
+        import numpy as np
+        arr = np.array(img)
+        unique = set(np.unique(arr))
+        # Должно быть больше 2 уникальных значений (не бинарное)
+        assert len(unique) > 2
+
+    def test_threshold_on_grayscale(self):
+        """Threshold работает на уже grayscale входе."""
+        raw = _make_grayscale_image(800, 600)
+        result, _ = preprocess_image_bytes(
+            raw, "image/png", enable_adaptive_threshold=True
+        )
+        assert isinstance(result, bytes)
+
+    def test_threshold_with_all_steps(self):
+        """Полный пайплайн: grayscale → autocontrast → deskew → upscale → sharpen → threshold."""
+        raw = _make_test_image(600, 400)
+        result, mime = preprocess_image_bytes(
+            raw, "image/jpeg",
+            enable_grayscale=True,
+            enable_autocontrast=True,
+            enable_deskew=True,
+            enable_upscale=True,
+            enable_sharpen=True,
+            enable_adaptive_threshold=True,
+        )
+        assert isinstance(result, bytes)
+        assert mime == "image/png"
+        img = Image.open(io.BytesIO(result))
+        assert img.width >= 1200  # upscale сработал
+
+
 class TestGetImageInfo:
     """Тесты вспомогательной функции."""
 

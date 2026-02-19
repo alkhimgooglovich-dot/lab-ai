@@ -34,3 +34,4 @@ def is_sanity_outlier(canonical_name: str, value: float) -> bool:
     lo, hi = SANITY_RANGES[canonical_name]
     return not (lo <= value <= hi)
 
+

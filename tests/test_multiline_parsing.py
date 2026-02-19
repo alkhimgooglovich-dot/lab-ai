@@ -546,3 +546,4 @@ class TestMultiLineNoRegression:
         assert quality["suspicious_count"] == 0
 
 
+
