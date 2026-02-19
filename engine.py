@@ -68,6 +68,11 @@ WARN_PCT = 10.0
 # ==========================
 OCR_RERUN_MIN_SCORE = 45.0   # parse_score ниже этого → делаем rerun OCR
 
+# ==========================
+# B3: LLM GATE ПОРОГИ
+# ==========================
+LLM_MIN_PARSE_SCORE = 55.0   # parse_score ниже этого → LLM не вызываем
+
 
 # ==========================
 # НАСТРОЙКИ YandexGPT
@@ -2104,15 +2109,49 @@ def generate_pdf_report(
         _dbg(f"  deviation: {it.name} value={it.value} ref={format_range(it.ref)} "
              f"status={it.status} confidence={it.confidence}")
 
-    # === ПОВЕДЕНИЕ ДЛЯ НЕИЗВЕСТНЫХ БЛАНКОВ ===
-    # Если valid_value_count < 5 — не вызываем LLM
-    if quality["valid_value_count"] < 5:
-        _dbg(f"valid_value_count={quality['valid_value_count']} < 5 → пропускаем LLM")
-        answer = (
-            "Не удалось надёжно распознать достаточное количество показателей "
-            "из документа. Попробуйте загрузить более чёткий файл/фото или "
-            "другой формат. Таблица ниже может содержать частично распознанные данные."
-        )
+    # === B3: LLM GATE (двойная проверка) ===
+    _valid_count = quality["valid_value_count"]
+    _ps = quality.get("metrics", {}).get("parse_score", 100.0)
+
+    _eligible_by_count = _valid_count >= 5
+    _eligible_by_score = _ps >= LLM_MIN_PARSE_SCORE
+
+    # Определяем решение
+    if not _eligible_by_count:
+        _llm_decision = "SKIP_LOW_VALUES"
+    elif not _eligible_by_score:
+        _llm_decision = "SKIP_LOW_SCORE"
+    else:
+        _llm_decision = "CALL"
+
+    # Записываем диагностику
+    if "metrics" not in quality:
+        quality["metrics"] = {}
+    quality["metrics"]["llm_gate"] = {
+        "eligible_by_valid_count": _eligible_by_count,
+        "eligible_by_parse_score": _eligible_by_score,
+        "min_parse_score": LLM_MIN_PARSE_SCORE,
+        "parse_score": _ps,
+        "decision": _llm_decision,
+    }
+
+    _dbg(f"LLM gate: decision={_llm_decision}, "
+         f"valid_count={_valid_count}, parse_score={_ps}")
+
+    if _llm_decision != "CALL":
+        # Не вызываем LLM
+        if _llm_decision == "SKIP_LOW_VALUES":
+            answer = (
+                "Не удалось надёжно распознать достаточное количество показателей "
+                "из документа. Попробуйте загрузить более чёткий файл/фото или "
+                "другой формат. Таблица ниже может содержать частично распознанные данные."
+            )
+        else:  # SKIP_LOW_SCORE
+            answer = (
+                "Качество распознавания документа недостаточно для автоматического "
+                "анализа. Попробуйте загрузить более чёткий файл/фото. "
+                "Таблица ниже может содержать частично распознанные данные."
+            )
         high_low = []  # не показываем факты
     else:
         dict_expl = build_dict_explanations(high_low)
