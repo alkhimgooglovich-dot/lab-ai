@@ -909,7 +909,8 @@ def _smart_to_candidates(raw_text: str) -> str:
       3. Если HELIX → helix_table_to_candidates.
       4. Иначе → universal_extract.
       5. FALLBACK: если спец-парсер вернул пустоту → universal_extract.
-      6. FALLBACK-2: если universal пуст → helix_table_to_candidates.
+
+    ВАЖНО: universal НЕ вызывает helix. UNKNOWN НЕ вызывает helix.
     """
     from parsers.lab_detector import detect_lab, LabType
     from parsers.medsi_extractor import medsi_inline_to_candidates
@@ -940,9 +941,8 @@ def _smart_to_candidates(raw_text: str) -> str:
         _dbg(f"_smart_to_candidates: Universal → {len(candidates.splitlines())} candidates")
         return candidates
 
-    # ─── Fallback-2: helix на случай регрессии ───
-    _dbg("_smart_to_candidates: Universal empty → fallback to helix")
-    return helix_table_to_candidates(raw_text)
+    _dbg("_smart_to_candidates: all extractors returned empty")
+    return ""
 
 
 def parse_items_from_candidates(raw_text: str) -> List[Item]:
