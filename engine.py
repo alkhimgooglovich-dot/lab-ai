@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 from ocr_preprocess import preprocess_image_bytes
+from parsers.ocr_preflight import choose_ocr_mode_preflight
 
 
 # ==========================
@@ -1999,7 +2000,29 @@ def generate_pdf_report(
     if not raw_text:
         if not file_bytes:
             raise ValueError("Нужно либо вставить текст анализов, либо загрузить файл (PDF/фото).")
-        raw_text = (extract_text_from_upload(file_bytes, filename=filename, mimetype=mimetype) or "").strip()
+
+        # === B5-A: Preflight — определяем режим OCR ДО первого вызова ===
+        # Для PDF пытаемся извлечь текстовый слой, чтобы preflight мог проверить его
+        _pdf_direct_text = None
+        if mimetype == "application/pdf" or (filename or "").lower().endswith(".pdf"):
+            _pdf_direct_text = try_extract_text_from_pdf_bytes(file_bytes) or ""
+
+        preflight = choose_ocr_mode_preflight(
+            file_bytes=file_bytes,
+            filename=filename,
+            content_type=mimetype,
+            pdf_direct_text=_pdf_direct_text,
+        )
+        _dbg(f"B5-A preflight: {preflight}")
+
+        raw_text = (
+            extract_text_from_upload(
+                file_bytes,
+                filename=filename,
+                mimetype=mimetype,
+                adaptive_threshold=preflight["adaptive_threshold"],
+            ) or ""
+        ).strip()
 
     if not raw_text:
         raise ValueError("Не удалось получить текст из файла. См. outputs/ocr_debug.txt")
@@ -2073,6 +2096,16 @@ def generate_pdf_report(
     # Записываем rerun-диагностику в quality["metrics"]
     quality["metrics"]["rerun"] = rerun_info
     _dbg(f"B2 rerun info: {rerun_info}")
+
+    # === B5-A: записываем preflight диагностику в quality ===
+    if "metrics" not in quality:
+        quality["metrics"] = {}
+    _preflight_info = locals().get("preflight")
+    if _preflight_info:
+        quality["metrics"]["ocr_preflight"] = {
+            "adaptive_threshold_first_run": _preflight_info["adaptive_threshold"],
+            "reason": _preflight_info["reason"],
+        }
 
     low_quality = (
         quality["coverage_score"] < 0.6
