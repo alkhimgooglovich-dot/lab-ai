@@ -1439,7 +1439,7 @@ def status_class_for_item(it: Item, warn_pct: float = WARN_PCT) -> str:
     return "muted"
 
 
-def build_template_context(sex: str, age: int, items: List[Item], high_low: List[Item], human_text: str, missing_warnings: Optional[List[str]] = None) -> dict:
+def build_template_context(sex: str, age: int, items: List[Item], high_low: List[Item], human_text: str, missing_warnings: Optional[List[str]] = None, quality: Optional[dict] = None) -> dict:
     """
     Формирует контекст для шаблона отчёта.
     high_low — список отклонений (ВЫШЕ/НИЖЕ) для блока "Краткий итог по фактам".
@@ -1475,6 +1475,12 @@ def build_template_context(sex: str, age: int, items: List[Item], high_low: List
         if expl:
             explain_lines.append(f"<strong class='mono'>{it.name}</strong>: {expl}")
     
+    from parsers.report_helpers import build_quality_section_html
+
+    quality_section_html = ""
+    if quality:
+        quality_section_html = build_quality_section_html(quality)
+
     return {
         "sex": sex,
         "age": age,
@@ -1485,6 +1491,7 @@ def build_template_context(sex: str, age: int, items: List[Item], high_low: List
         "human_text": human_text,
         "raw_path": str(RAW_RESPONSE_PATH),
         "missing_warnings": missing_warnings or [],
+        "quality_section_html": quality_section_html,
     }
 
 
@@ -2189,7 +2196,13 @@ def generate_pdf_report(
         answer = disclaimer_prefix + answer
         _dbg("universal disclaimer prepended to answer")
 
-    context = build_template_context(sex, age, items, high_low, answer, missing_warnings)
+    # === B5-B: добавляем заметку о качестве в текстовый ответ ===
+    from parsers.report_helpers import build_user_quality_note
+    _quality_note = build_user_quality_note(quality)
+    if _quality_note:
+        answer = answer.rstrip() + "\n\n" + _quality_note
+
+    context = build_template_context(sex, age, items, high_low, answer, missing_warnings, quality=quality)
     # Используем созданный ранее created_at для контекста (если нужно обновить, можно использовать context["created_at"])
     download_name = f"report_{safe_ts}_{uid}.pdf"
 
