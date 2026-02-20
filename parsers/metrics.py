@@ -1,11 +1,15 @@
 """
 B1-метрики качества OCR и парсинга.
+B4-классификатор причин низкого качества (reasons).
 
 Все функции — чистые, детерминированные, без внешних зависимостей.
 """
 
+import logging
 import re
 from typing import List, Any
+
+logger = logging.getLogger(__name__)
 
 # ─── Биомаркеры (копия из line_scorer, чтобы не тянуть зависимость) ───
 _BIOMARKER_CODES = {
@@ -202,4 +206,118 @@ def compute_parse_score(ocr: dict, parse: dict) -> float:
     )
     score = round(100.0 * max(0.0, min(1.0, score01)), 1)
     return score
+
+
+# ═══════════════════════════════════════════
+# B4: REASON THRESHOLDS & CLASSIFIER
+# ═══════════════════════════════════════════
+
+# Все пороги для классификации причин — в одном месте.
+# Менять значения можно, но они должны быть константами (не ML).
+REASON_THRESHOLDS = {
+    "HIGH_NOISE":            0.45,   # noise_line_ratio >= порог
+    "LOW_DIGIT_RATIO":       0.15,   # digit_line_ratio < порог
+    "LOW_BIOMARKER_RATIO":   0.08,   # biomarker_line_ratio < порог
+    "TOO_FEW_LINES":         10,     # line_count < порог
+    "LOW_COVERAGE":          0.15,   # coverage_ratio < порог (parsed_items / numeric_candidates)
+    "MANY_OUTLIERS_RATIO":   0.25,   # sanity_outlier_count / parsed_items >= порог
+    "MANY_SUSPICIOUS_RATIO": 0.30,   # suspicious_count / parsed_items >= порог
+}
+
+# Фиксированный порядок кодов (для стабильной сортировки)
+_REASON_ORDER = [
+    "HIGH_NOISE",
+    "LOW_DIGIT_RATIO",
+    "LOW_BIOMARKER_RATIO",
+    "TOO_FEW_LINES",
+    "LOW_COVERAGE",
+    "MANY_OUTLIERS",
+    "MANY_SUSPICIOUS",
+]
+
+
+def classify_quality_reasons(ocr: dict, parse: dict) -> list[str]:
+    """
+    Детерминированный классификатор причин низкого качества.
+
+    Args:
+        ocr: словарь OCR-метрик. Ожидаемые ключи:
+            - noise_line_ratio (float, 0..1)
+            - digit_line_ratio (float, 0..1)
+            - biomarker_line_ratio (float, 0..1)
+            - line_count (int)
+            - numeric_candidates_count (int)
+        parse: словарь Parse-метрик. Ожидаемые ключи:
+            - parsed_items (int) — сколько показателей распознано
+            - coverage_ratio (float, 0..1) — parsed_items / numeric_candidates
+            - suspicious_count (int)
+            - sanity_outlier_count (int)
+            - dedup_dropped_count (int)
+            - valid_value_count (int)
+
+    Returns:
+        Отсортированный список строковых кодов-причин.
+        Пустой список = всё ОК, причин нет.
+    """
+    T = REASON_THRESHOLDS
+    reasons: list[str] = []
+
+    # --- OCR метрики ---
+    if ocr.get("noise_line_ratio", 0) >= T["HIGH_NOISE"]:
+        reasons.append("HIGH_NOISE")
+
+    if ocr.get("line_count", 999) < T["TOO_FEW_LINES"]:
+        reasons.append("TOO_FEW_LINES")
+
+    if ocr.get("digit_line_ratio", 1.0) < T["LOW_DIGIT_RATIO"]:
+        reasons.append("LOW_DIGIT_RATIO")
+
+    if ocr.get("biomarker_line_ratio", 1.0) < T["LOW_BIOMARKER_RATIO"]:
+        reasons.append("LOW_BIOMARKER_RATIO")
+
+    # --- Parse метрики ---
+    parsed = parse.get("parsed_items", 0)
+    coverage = parse.get("coverage_ratio", 1.0)
+
+    if coverage < T["LOW_COVERAGE"] and parsed > 0:
+        reasons.append("LOW_COVERAGE")
+
+    if parsed > 0:
+        outlier_ratio = parse.get("sanity_outlier_count", 0) / parsed
+        if outlier_ratio >= T["MANY_OUTLIERS_RATIO"]:
+            reasons.append("MANY_OUTLIERS")
+
+        susp_ratio = parse.get("suspicious_count", 0) / parsed
+        if susp_ratio >= T["MANY_SUSPICIOUS_RATIO"]:
+            reasons.append("MANY_SUSPICIOUS")
+
+    # Стабильная сортировка по _REASON_ORDER
+    order_map = {r: i for i, r in enumerate(_REASON_ORDER)}
+    reasons.sort(key=lambda r: order_map.get(r, 999))
+
+    return reasons
+
+
+def build_metrics_with_reasons(ocr: dict, parse: dict, parse_score: float) -> dict:
+    """
+    Собирает блок с reasons и reason_summary.
+    Вызывается из engine.py после compute_parse_score.
+
+    Returns:
+        dict с ключами "reasons" (list[str]) и "reason_summary" (str).
+    """
+    reasons = classify_quality_reasons(ocr, parse)
+    reason_summary = ", ".join(reasons) if reasons else ""
+
+    if reasons:
+        logger.warning(
+            "Quality reasons: parse_score=%.1f reasons=[%s]",
+            parse_score, reason_summary,
+        )
+
+    return {
+        "reasons": reasons,
+        "reason_summary": reason_summary,
+    }
+
 

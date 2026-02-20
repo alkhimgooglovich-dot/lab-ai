@@ -155,3 +155,4 @@ class TestFallbackInSmartCandidates:
         assert isinstance(result, str)
 
 
+

@@ -273,3 +273,4 @@ class TestRerunIntegrationMocked:
         assert rerun_info["performed"] is False
         assert rerun_info["chosen"] == "first"
 
+

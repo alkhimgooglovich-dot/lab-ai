@@ -109,3 +109,4 @@ class TestLabTypeEnum:
         assert r.confidence == 0.9
 
 
+

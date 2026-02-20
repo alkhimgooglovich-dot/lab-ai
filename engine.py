@@ -1869,7 +1869,7 @@ def _run_parse_pipeline(raw_text: str):
     (None, None, 0, 0) если парсинг дал 0 items.
     """
     from parsers.quality import evaluate_parse_quality
-    from parsers.metrics import compute_ocr_quality_metrics, compute_parse_metrics, compute_parse_score
+    from parsers.metrics import compute_ocr_quality_metrics, compute_parse_metrics, compute_parse_score, classify_quality_reasons
 
     text = raw_text
     if "\t" not in text:
@@ -1896,11 +1896,24 @@ def _run_parse_pipeline(raw_text: str):
     _parse_metrics = compute_parse_metrics(items, quality_dict=quality)
     _parse_score = compute_parse_score(_ocr_metrics, _parse_metrics)
 
+    # B4: классификация причин низкого качества
+    _reasons = classify_quality_reasons(_ocr_metrics, _parse_metrics)
+    _reason_summary = ", ".join(_reasons) if _reasons else ""
+
+    if _reasons:
+        import logging as _logging
+        _logging.getLogger("engine").warning(
+            "Quality reasons: parse_score=%.1f reasons=[%s]",
+            _parse_score, _reason_summary,
+        )
+
     quality["metrics"] = {
         "schema_version": "1.0",
         "ocr": _ocr_metrics,
         "parse": _parse_metrics,
         "parse_score": _parse_score,
+        "reasons": _reasons,
+        "reason_summary": _reason_summary,
     }
 
     return items, quality, dedup_dropped, outlier_count
