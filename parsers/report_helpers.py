@@ -146,3 +146,4 @@ def build_user_quality_note(quality: dict) -> str:
 
     return "\n".join(parts)
 
+

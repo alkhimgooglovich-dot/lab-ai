@@ -19,6 +19,7 @@ class LabType(Enum):
     HELIX = "helix"
     MEDSI = "medsi"
     INVITRO = "invitro"
+    GEMOTEST = "gemotest"
     UNKNOWN = "unknown"
 
 
@@ -159,9 +160,10 @@ def detect_lab_format(raw_text: str) -> str:
     """
     result = detect_lab(raw_text)
     mapping = {
-        LabType.MEDSI:   "medsi",
-        LabType.HELIX:   "helix",
-        LabType.INVITRO: "generic",   # пока нет отдельного парсера
-        LabType.UNKNOWN: "generic",
+        LabType.MEDSI:    "medsi",
+        LabType.HELIX:    "helix",
+        LabType.INVITRO:  "generic",   # пока нет отдельного парсера
+        LabType.GEMOTEST: "generic",   # обрабатывается через universal
+        LabType.UNKNOWN:  "generic",
     }
     return mapping.get(result.lab_type, "generic")

@@ -218,14 +218,14 @@ def _extract_unit_from_line(s: str) -> str:
     if not t or len(t) > 20:  # unit не может быть длиннее 20 символов
         return ""
     # Содержит числа (кроме *10^N) — не чистый unit
-    if has_numeric_value(t) and not re.match(r"^\*?10[\^*]\d+", t):
+    if has_numeric_value(t) and not re.match(r"^[xхXХ]?\*?10[\^*]\d+", t):
         return ""
     t_norm = _normalize_scientific_notation(t)
     # Проверяем через unit_dictionary
     if is_valid_unit(t_norm.strip(".,;:()")):
         return t_norm
     # Проверяем шаблоны: *10^N/л, г/л и т.д.
-    if re.match(r"^\*?10\s*\^\s*\d+/[а-яa-z]+$", t_norm, re.IGNORECASE):
+    if re.match(r"^[xхXХ]?\*?10\s*\^\s*\d+/[а-яa-z]+$", t_norm, re.IGNORECASE):
         return t_norm
     return ""
 
@@ -237,6 +237,8 @@ def _parse_value_unit_from_line(s: str) -> Tuple[Optional[float], str]:
     """Парсит значение и единицу из строки-значения."""
     t = re.sub(r"\s+", " ", (s or "").strip())
     t = t.replace("↑", "").replace("↓", "").replace("+", "").strip()
+    # Убираем trailing dash (Гемотест: "0.28-" означает ↓)
+    t = re.sub(r"^(\d+(?:[.,]\d+)?)\s*-$", r"\1", t)
     t = _normalize_scientific_notation(t)
 
     # *10^N
@@ -437,6 +439,69 @@ def _dedup_candidates(candidates: List[str]) -> List[str]:
 
 
 # ──────────────────────────────────────────────
+# Предобработка: склейка разбитых pypdf-строк
+# ──────────────────────────────────────────────
+def _rejoin_broken_units(lines: List[str]) -> List[str]:
+    """
+    Склеивает единицы, разбитые pypdf на 2 строки:
+      'x10*12/' + 'л' → 'x10*12/л'
+      'x10*9/'  + 'л' → 'x10*9/л'
+      
+    Правило: если строка заканчивается на '/' и следующая строка —
+    одиночная кириллическая буква (длина <= 2), склеиваем.
+    """
+    result = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if (ln.rstrip().endswith('/') and 
+            i + 1 < len(lines) and 
+            len(lines[i + 1].strip()) <= 2 and 
+            re.match(r'^[а-яА-Яa-zA-Z]+$', lines[i + 1].strip())):
+            result.append(ln.rstrip() + lines[i + 1].strip())
+            i += 2
+        else:
+            result.append(ln)
+            i += 1
+    return result
+
+
+def _rejoin_broken_names(lines: List[str]) -> List[str]:
+    """
+    Склеивает имя показателя с продолжением в скобках:
+      'Средний объем эритроцитов' + '(MCV)' → 'Средний объем эритроцитов (MCV)'
+      'Среднее содержание' + 'Hb' → 'Среднее содержание Hb'
+      
+    Правило: если текущая строка — имя (буквы, без цифр в начале, не noise),
+    а следующая — короткая строка в скобках ИЛИ короткое латинское слово,
+    склеиваем.
+    """
+    result = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        if (i + 1 < len(lines) and 
+            _looks_like_name_line(ln) and
+            not _starts_like_value_line(ln)):
+            next_ln = lines[i + 1].strip()
+            # Случай 1: следующая строка — код в скобках: (MCV), (МСН), (МСНС)
+            if re.match(r'^\([A-Za-zА-Яа-яёЁ0-9\-]+\)$', next_ln):
+                result.append(ln.strip() + ' ' + next_ln)
+                i += 2
+                continue
+            # Случай 2: следующая строка — короткое слово (Hb, IgG и т.п.)
+            if (len(next_ln) <= 5 and 
+                re.match(r'^[A-Za-z][A-Za-z0-9]*$', next_ln) and
+                not _starts_like_value_line(next_ln)):
+                result.append(ln.strip() + ' ' + next_ln)
+                i += 2
+                continue
+        result.append(ln)
+        i += 1
+    return result
+
+
+# ──────────────────────────────────────────────
 # ГЛАВНАЯ ФУНКЦИЯ
 # ──────────────────────────────────────────────
 def universal_extract(raw_text: str) -> str:
@@ -462,6 +527,10 @@ def universal_extract(raw_text: str) -> str:
 
     if not lines:
         return ""
+
+    # ─── Предобработка: склейка разбитых pypdf-строк ───
+    lines = _rejoin_broken_units(lines)
+    lines = _rejoin_broken_names(lines)
 
     # ─── Pass 1: однострочный ───
     one_line_cands: List[str] = []

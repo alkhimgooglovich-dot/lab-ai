@@ -183,3 +183,4 @@ class TestUserQualityNote:
         note = build_user_quality_note({})
         assert note == ""
 
+

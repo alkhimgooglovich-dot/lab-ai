@@ -214,3 +214,4 @@ class TestPreflightDiagnostics:
                 f"Неизвестный reason={result['reason']} для {fn}"
             )
 
+

@@ -179,7 +179,7 @@ class TestLabTypeEnum:
         assert LabType.INVITRO.value == "invitro"
 
     def test_all_lab_types(self):
-        expected = {"medsi", "helix", "invitro", "unknown"}
+        expected = {"medsi", "helix", "invitro", "gemotest", "unknown"}
         actual = {lt.value for lt in LabType}
         assert expected == actual
 
@@ -215,5 +215,6 @@ class TestDataDrivenExtensibility:
                 assert "weight" in sig
                 assert "pattern" in sig
                 assert "kind" in sig
+
 
 

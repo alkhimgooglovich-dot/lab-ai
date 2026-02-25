@@ -96,7 +96,7 @@ def is_medsi_format(raw_text: str) -> bool:
 
     if code_count >= 5:
         return True
-    if has_10_9 and has_10_12:
+    if has_10_9 and has_10_12 and code_count >= 2:
         return True
     if has_soe and has_mmch and code_count >= 2:
         return True
@@ -479,6 +479,7 @@ def medsi_inline_to_candidates(raw_text: str) -> str:
             result.append(c)
 
     return "\n".join(result)
+
 
 
 

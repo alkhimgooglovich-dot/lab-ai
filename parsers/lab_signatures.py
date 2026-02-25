@@ -58,6 +58,20 @@ LAB_SIGNATURES = [
         ],
     },
 
+    # ═══ GEMOTEST ═══
+    {
+        "lab_type": LabType.GEMOTEST,
+        "threshold": 0.3,
+        "signatures": [
+            {"kind": "name",   "pattern": "гемотест",                          "weight": 0.5},
+            {"kind": "name",   "pattern": "gemotest",                          "weight": 0.5},
+            {"kind": "domain", "pattern": "gemotest.ru",                       "weight": 0.5},
+            {"kind": "name",   "pattern": "лаборатория гемотест",              "weight": 0.6},
+            {"kind": "header", "pattern": r"лабораторный комплекс правообладателя",
+             "weight": 0.4},
+        ],
+    },
+
     # ═══ INVITRO ═══
     {
         "lab_type": LabType.INVITRO,
@@ -72,5 +86,6 @@ LAB_SIGNATURES = [
         ],
     },
 ]
+
 
 

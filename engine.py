@@ -933,18 +933,20 @@ def _smart_to_candidates(raw_text: str) -> str:
     # ─── МЕДСИ ───
     if det.lab_type == LabType.MEDSI:
         candidates = medsi_inline_to_candidates(raw_text)
-        if candidates:
-            _dbg(f"_smart_to_candidates: MEDSI → {len(candidates.splitlines())} candidates")
+        cand_count = len(candidates.splitlines()) if candidates else 0
+        if cand_count >= 5:
+            _dbg(f"_smart_to_candidates: MEDSI → {cand_count} candidates")
             return candidates
-        _dbg("_smart_to_candidates: MEDSI extractor empty, falling back to universal")
+        _dbg(f"_smart_to_candidates: MEDSI returned only {cand_count} candidates, falling back to universal")
 
     # ─── HELIX ───
     if det.lab_type == LabType.HELIX:
         candidates = helix_table_to_candidates(raw_text)
-        if candidates:
-            _dbg(f"_smart_to_candidates: HELIX → {len(candidates.splitlines())} candidates")
+        cand_count = len(candidates.splitlines()) if candidates else 0
+        if cand_count >= 5:
+            _dbg(f"_smart_to_candidates: HELIX → {cand_count} candidates")
             return candidates
-        _dbg("_smart_to_candidates: HELIX extractor empty, falling back to universal")
+        _dbg(f"_smart_to_candidates: HELIX returned only {cand_count} candidates, falling back to universal")
 
     # ─── INVITRO (пока → universal, место для будущего invitro_parser) ───
     if det.lab_type == LabType.INVITRO:
@@ -954,6 +956,14 @@ def _smart_to_candidates(raw_text: str) -> str:
             _dbg(f"_smart_to_candidates: INVITRO (universal) → {len(candidates.splitlines())} candidates")
             return candidates
         _dbg("_smart_to_candidates: INVITRO (universal) empty")
+
+    # ─── GEMOTEST (→ universal) ───
+    if det.lab_type == LabType.GEMOTEST:
+        candidates = universal_extract(raw_text)
+        if candidates:
+            _dbg(f"_smart_to_candidates: GEMOTEST (universal) → {len(candidates.splitlines())} candidates")
+            return candidates
+        _dbg("_smart_to_candidates: GEMOTEST (universal) empty")
 
     # ─── UNKNOWN / fallback ───
     candidates = universal_extract(raw_text)

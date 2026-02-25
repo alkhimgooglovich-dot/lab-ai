@@ -99,7 +99,7 @@ class TestLabTypeEnum:
         assert LabType.INVITRO.value == "invitro"
 
     def test_all_lab_types(self):
-        expected = {"medsi", "helix", "invitro", "unknown"}
+        expected = {"medsi", "helix", "invitro", "gemotest", "unknown"}
         actual = {lt.value for lt in LabType}
         assert expected == actual
 
@@ -107,6 +107,7 @@ class TestLabTypeEnum:
         r = DetectResult(LabType.INVITRO, confidence=0.9, matched_signatures=["invitro.ru"])
         assert r.lab_type == LabType.INVITRO
         assert r.confidence == 0.9
+
 
 
 
