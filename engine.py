@@ -422,6 +422,11 @@ RUS_NAME_MAP = {
     "соэ": "ESR",
     # MCH / MCHC — ПЕРЕД "эритроцит"! (иначе "в эритроците (МСН)" → RBC)
     # ВАЖНО: "мснс" ПЕРЕД "мсн", иначе "мсн" матчится внутри "мснс"!
+    # Частичные имена (когда pypdf разбивает на 3+ строки)
+    "в эритроцитах (мснс)": "MCHC",
+    "в эритроцитах мснс": "MCHC",
+    "в эритроците (мсн)": "MCH",
+    "в эритроците мсн": "MCH",
     "средняя концентрация": "MCHC",
     "средн. конц.": "MCHC",
     "мснс": "MCHC",         # кириллический код
@@ -940,16 +945,79 @@ def helix_table_to_candidates(plain_text: str) -> str:
 def _filter_noise_candidates(candidates: str) -> str:
     """Убирает кандидаты, чьё имя является мусорной строкой (ГОСТ, служебные и т.п.)."""
     from parsers.line_scorer import is_noise
+
+    # Подстроки, при наличии которых в имени кандидат считается мусором
+    _NOISE_SUBSTRINGS = (
+        "гост",
+        "гемотест",
+        "лаборатория гемотест",
+        "лаборатория инвитро",
+        "лаборатория медси",
+        "лаборатория хеликс",
+        "сертификат соответствия",
+        "правообладател",
+        "iso 9001",
+        "iso 15189",
+        "iso 13485",
+    )
+
     lines = candidates.splitlines()
     filtered = []
     for line in lines:
         parts = line.split("\t")
         if parts:
             name = parts[0].strip()
+            name_lower = name.lower()
+            # Проверка 1: is_noise (prefix-based)
             if is_noise(name):
+                continue
+            # Проверка 2: contains-based для оставшихся случаев
+            if any(sub in name_lower for sub in _NOISE_SUBSTRINGS):
                 continue
         filtered.append(line)
     return "\n".join(filtered)
+
+
+def _prestrip_interstitial_noise(raw_text: str) -> str:
+    """
+    Убирает из текста строки-шум (коды услуг, лицензии, приказы и пр.),
+    которые находятся МЕЖДУ именем показателя и его значением.
+
+    Это увеличивает эффективное окно multi-line pass в universal_extract
+    (не меняя сам universal_extractor.py).
+
+    Безопасно: сохраняем строки-значения (начинаются с цифры/стрелки),
+    строки-единицы (л, мл, %, г/л, x10^…), и строки-имена.
+    """
+    from parsers.line_scorer import is_header_service_line, is_noise
+
+    lines = raw_text.splitlines()
+    result: list[str] = []
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            result.append(ln)
+            continue
+
+        # Всегда убираем header/service строки (коды услуг, лицензии, приказы)
+        if is_header_service_line(s):
+            continue
+
+        # Проверяем is_noise, но сохраняем потенциальные значения и единицы
+        if is_noise(s):
+            # Строки с цифрой в начале — возможные значения → сохраняем
+            if re.match(r'^[↑↓+\-]?\s*\d', s):
+                result.append(ln)
+                continue
+            # Короткие строки из букв/символов единиц (л, мл, %, фл) → сохраняем
+            if re.match(r'^[а-яА-Яa-zA-Z/%*^°µ]+[/а-яА-Яa-zA-Z0-9^]*$', s) and len(s) <= 15:
+                result.append(ln)
+                continue
+            # Остальной шум → убираем
+            continue
+
+        result.append(ln)
+    return "\n".join(result)
 
 
 def _smart_to_candidates(raw_text: str) -> str:
@@ -995,7 +1063,8 @@ def _smart_to_candidates(raw_text: str) -> str:
     # ─── INVITRO (пока → universal, место для будущего invitro_parser) ───
     if det.lab_type == LabType.INVITRO:
         # TODO: заменить на invitro_parser, когда будет готов
-        candidates = universal_extract(raw_text)
+        cleaned_text = _prestrip_interstitial_noise(raw_text)
+        candidates = universal_extract(cleaned_text)
         if candidates:
             candidates = _filter_noise_candidates(candidates)
             _dbg(f"_smart_to_candidates: INVITRO (universal) → {len(candidates.splitlines())} candidates")
@@ -1004,7 +1073,8 @@ def _smart_to_candidates(raw_text: str) -> str:
 
     # ─── GEMOTEST (→ universal) ───
     if det.lab_type == LabType.GEMOTEST:
-        candidates = universal_extract(raw_text)
+        cleaned_text = _prestrip_interstitial_noise(raw_text)
+        candidates = universal_extract(cleaned_text)
         if candidates:
             candidates = _filter_noise_candidates(candidates)
             _dbg(f"_smart_to_candidates: GEMOTEST (universal) → {len(candidates.splitlines())} candidates")
@@ -1012,7 +1082,8 @@ def _smart_to_candidates(raw_text: str) -> str:
         _dbg("_smart_to_candidates: GEMOTEST (universal) empty")
 
     # ─── UNKNOWN / fallback ───
-    candidates = universal_extract(raw_text)
+    cleaned_text = _prestrip_interstitial_noise(raw_text)
+    candidates = universal_extract(cleaned_text)
     if candidates:
         candidates = _filter_noise_candidates(candidates)
         _dbg(f"_smart_to_candidates: Universal → {len(candidates.splitlines())} candidates")
@@ -1153,6 +1224,14 @@ def parse_items_from_candidates(raw_text: str) -> List[Item]:
                 _dbg(f"WARN: {name} value={value} ref={format_range(ref)} status={status} (возможно ошибка)")
             if status == "НИЖЕ" and value >= ref.low if ref.low else False:
                 _dbg(f"WARN: {name} value={value} ref={format_range(ref)} status={status} (возможно ошибка)")
+
+        # Подмена неполного raw_name на красивое отображаемое имя
+        _DISPLAY_OVERRIDE = {
+            "MCH": "Среднее содержание Hb в эр. (MCH)",
+            "MCHC": "Средняя концентрация Hb в эр. (MCHC)",
+        }
+        if name in _DISPLAY_OVERRIDE and len(raw_name) < 20:
+            raw_name = _DISPLAY_OVERRIDE[name]
 
         items.append(Item(
             raw_name=raw_name,
@@ -2293,8 +2372,15 @@ def generate_pdf_report(
         _dbg("universal disclaimer prepended to answer")
 
     # === B5-B: добавляем заметку о качестве в текстовый ответ ===
+    # Определяем тип источника для рекомендации
+    _source_type = ""
+    if mimetype == "application/pdf" or (filename or "").lower().endswith(".pdf"):
+        _source_type = "pdf"
+    elif mimetype and mimetype.startswith("image/"):
+        _source_type = "image"
+
     from parsers.report_helpers import build_user_quality_note
-    _quality_note = build_user_quality_note(quality)
+    _quality_note = build_user_quality_note(quality, source_type=_source_type)
     if _quality_note:
         answer = answer.rstrip() + "\n\n" + _quality_note
 

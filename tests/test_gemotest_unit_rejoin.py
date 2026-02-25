@@ -182,3 +182,4 @@ class TestGemotestIntegration:
         names = [l.split('\t')[0].lower() for l in result.splitlines()]
         assert any('соэ' in n for n in names)
 
+

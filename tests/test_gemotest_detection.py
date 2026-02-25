@@ -237,3 +237,4 @@ class TestRegression:
         result = detect_lab(text)
         assert result.lab_type == LabType.INVITRO
 
+

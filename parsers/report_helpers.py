@@ -112,10 +112,12 @@ def build_quality_section_html(quality: dict) -> str:
     return "\n".join(paragraphs)
 
 
-def build_user_quality_note(quality: dict) -> str:
+def build_user_quality_note(quality: dict, source_type: str = "") -> str:
     """
     Короткая текстовая заметка для добавления в текстовый ответ пользователю.
     Возвращает пустую строку, если добавлять нечего.
+
+    source_type: "pdf", "image", или "" (неизвестно)
     """
     metrics = quality.get("metrics")
     if not metrics:
@@ -136,14 +138,15 @@ def build_user_quality_note(quality: dict) -> str:
                 "ИИ-расшифровка не выполнена: низкое качество распознавания документа."
             )
 
-    # Если есть замечания — рекомендация
+    # Если есть замечания — рекомендация (только для фото, не для PDF)
     reasons = metrics.get("reasons", [])
-    if reasons:
+    if reasons and source_type != "pdf":
         parts.append(
             "Рекомендация: попробуйте загрузить PDF-файл вместо фото, "
             "либо сделайте снимок без бликов и крупнее."
         )
 
     return "\n".join(parts)
+
 
 

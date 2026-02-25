@@ -137,3 +137,4 @@ class TestRealBiomarkersNotFiltered:
         """Реальный показатель должен иметь score > 0."""
         assert score_line("Гемоглобин") > 0.0
 
+

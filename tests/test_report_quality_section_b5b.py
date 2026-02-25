@@ -171,7 +171,7 @@ class TestUserQualityNote:
 
     def test_reasons_recommendation(self):
         q = _quality(reasons=["HIGH_NOISE"])
-        note = build_user_quality_note(q)
+        note = build_user_quality_note(q, source_type="image")
         assert "Рекомендация" in note
 
     def test_no_note_when_all_ok(self):
@@ -182,5 +182,6 @@ class TestUserQualityNote:
     def test_no_note_when_no_metrics(self):
         note = build_user_quality_note({})
         assert note == ""
+
 
 

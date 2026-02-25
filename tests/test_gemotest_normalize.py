@@ -96,3 +96,4 @@ class TestNoiseFiltering:
         for name in names:
             assert "ГОСТ" not in name and "9001" not in str(name), f"ГОСТ мусор в items: {names}"
 
+
