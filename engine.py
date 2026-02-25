@@ -137,6 +137,8 @@ EXPLAIN_DICT = {
     "EO%": "Эозинофилы (процент) — часть лейкоформулы; оценка зависит от клиники и других показателей крови.",
     "BA%": "Базофилы (процент) — часть лейкоформулы; оценка зависит от клиники и других показателей крови.",
     "EO": "Эозинофилы (абсолютное значение) — часть лейкоформулы; оценка зависит от клиники и других показателей крови.",
+    "MCH": "MCH — среднее содержание гемоглобина в эритроците; оценивается вместе с MCV и MCHC.",
+    "MCHC": "MCHC — средняя концентрация гемоглобина в эритроцитах; оценивается вместе с MCH и MCV.",
 }
 
 SPECIALIST_MAP = {
@@ -154,6 +156,8 @@ SPECIALIST_MAP = {
     "GLUC": {"терапевт", "эндокринолог"},
     "ESR": {"терапевт"},
     "NE_SEG": {"терапевт"},
+    "MCH": {"терапевт"},
+    "MCHC": {"терапевт"},
 }
 
 
@@ -416,6 +420,18 @@ ALIASES = {
 RUS_NAME_MAP = {
     "скорость оседания": "ESR",
     "соэ": "ESR",
+    # MCH / MCHC — ПЕРЕД "эритроцит"! (иначе "в эритроците (МСН)" → RBC)
+    # ВАЖНО: "мснс" ПЕРЕД "мсн", иначе "мсн" матчится внутри "мснс"!
+    "средняя концентрация": "MCHC",
+    "средн. конц.": "MCHC",
+    "мснс": "MCHC",         # кириллический код
+    "среднее содержание": "MCH",
+    "средн. сод.": "MCH",
+    "мсн": "MCH",           # кириллический код
+    # CRP — С-реактивный белок
+    "с-реактивный": "CRP",
+    "реактивный белок": "CRP",
+    "срб": "CRP",
     "лейкоцит": "WBC",
     "эритроцит": "RBC",
     "гемоглоб": "HGB",
@@ -439,6 +455,8 @@ RUS_NAME_MAP = {
     "эозинофил": "EO",
     "базофил": "BA",
     # Проценты - различные варианты написания
+    "нейтрофилы сегментоядерные %": "NE%",     # Гемотест: «Нейтрофилы сегментоядерные %»
+    "нейтрофилы сегментоядерные%": "NE%",
     "нейтрофилы, %": "NE%",
     "нейтрофилы %": "NE%",
     "нейтрофилы (%)": "NE%",
@@ -465,8 +483,9 @@ RUS_NAME_MAP = {
 def clean_raw_name(s: str) -> str:
     s = (s or "").strip()
     s = re.sub(r"\s+", " ", s)
-    # убираем лишние пометки, но оставляем смысл
-    s = re.sub(r"\s*\(.*?\)\s*", " ", s)     # всё в скобках (WBC), (микроскопия) и т.п.
+    # Убираем только латинские коды в скобках (WBC, MCV, микроскопия и т.п.)
+    # Оставляем кириллические коды (МСН, МСНС, СРБ, СОЭ) — они нужны для normalize_name
+    s = re.sub(r"\s*\([A-Za-z0-9\-#%\s]+\)\s*", " ", s)
     s = s.replace("%", "%")                  # оставим % в raw_name (для отображения), но нормализация ниже
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -482,6 +501,14 @@ def normalize_name(raw: str) -> str:
         return ALIASES.get(code, code)
 
     low = s.lower()
+
+    # ПРИОРИТЕТ: если имя содержит "%", сначала ищем % маппинги
+    if "%" in low:
+        for k, v in RUS_NAME_MAP.items():
+            if "%" in k and k in low:
+                return v
+
+    # Затем обычный поиск
     for k, v in RUS_NAME_MAP.items():
         if k in low:
             return v
@@ -910,6 +937,21 @@ def helix_table_to_candidates(plain_text: str) -> str:
     return "\n".join(merged).strip()
 
 
+def _filter_noise_candidates(candidates: str) -> str:
+    """Убирает кандидаты, чьё имя является мусорной строкой (ГОСТ, служебные и т.п.)."""
+    from parsers.line_scorer import is_noise
+    lines = candidates.splitlines()
+    filtered = []
+    for line in lines:
+        parts = line.split("\t")
+        if parts:
+            name = parts[0].strip()
+            if is_noise(name):
+                continue
+        filtered.append(line)
+    return "\n".join(filtered)
+
+
 def _smart_to_candidates(raw_text: str) -> str:
     """
     Авто-детект формата лаборатории и преобразование в TSV-кандидаты.
@@ -935,7 +977,8 @@ def _smart_to_candidates(raw_text: str) -> str:
         candidates = medsi_inline_to_candidates(raw_text)
         cand_count = len(candidates.splitlines()) if candidates else 0
         if cand_count >= 5:
-            _dbg(f"_smart_to_candidates: MEDSI → {cand_count} candidates")
+            candidates = _filter_noise_candidates(candidates)
+            _dbg(f"_smart_to_candidates: MEDSI → {len(candidates.splitlines()) if candidates.strip() else 0} candidates (raw {cand_count})")
             return candidates
         _dbg(f"_smart_to_candidates: MEDSI returned only {cand_count} candidates, falling back to universal")
 
@@ -944,7 +987,8 @@ def _smart_to_candidates(raw_text: str) -> str:
         candidates = helix_table_to_candidates(raw_text)
         cand_count = len(candidates.splitlines()) if candidates else 0
         if cand_count >= 5:
-            _dbg(f"_smart_to_candidates: HELIX → {cand_count} candidates")
+            candidates = _filter_noise_candidates(candidates)
+            _dbg(f"_smart_to_candidates: HELIX → {len(candidates.splitlines()) if candidates.strip() else 0} candidates (raw {cand_count})")
             return candidates
         _dbg(f"_smart_to_candidates: HELIX returned only {cand_count} candidates, falling back to universal")
 
@@ -953,6 +997,7 @@ def _smart_to_candidates(raw_text: str) -> str:
         # TODO: заменить на invitro_parser, когда будет готов
         candidates = universal_extract(raw_text)
         if candidates:
+            candidates = _filter_noise_candidates(candidates)
             _dbg(f"_smart_to_candidates: INVITRO (universal) → {len(candidates.splitlines())} candidates")
             return candidates
         _dbg("_smart_to_candidates: INVITRO (universal) empty")
@@ -961,6 +1006,7 @@ def _smart_to_candidates(raw_text: str) -> str:
     if det.lab_type == LabType.GEMOTEST:
         candidates = universal_extract(raw_text)
         if candidates:
+            candidates = _filter_noise_candidates(candidates)
             _dbg(f"_smart_to_candidates: GEMOTEST (universal) → {len(candidates.splitlines())} candidates")
             return candidates
         _dbg("_smart_to_candidates: GEMOTEST (universal) empty")
@@ -968,6 +1014,7 @@ def _smart_to_candidates(raw_text: str) -> str:
     # ─── UNKNOWN / fallback ───
     candidates = universal_extract(raw_text)
     if candidates:
+        candidates = _filter_noise_candidates(candidates)
         _dbg(f"_smart_to_candidates: Universal → {len(candidates.splitlines())} candidates")
         return candidates
 
@@ -1045,6 +1092,8 @@ def parse_items_from_candidates(raw_text: str) -> List[Item]:
                     return name_clean, base_str
         return raw_name, raw_val
 
+    from parsers.line_scorer import is_noise as _is_noise_line
+
     for line in (raw_text or "").splitlines():
         if not line.strip():
             continue
@@ -1054,6 +1103,10 @@ def parse_items_from_candidates(raw_text: str) -> List[Item]:
             continue
 
         raw_name = parts[0].strip()
+
+        # Фильтр мусорных строк (ГОСТ, служебные и т.п.)
+        if _is_noise_line(raw_name):
+            continue
         raw_val = parts[1].strip()
         ref_text = parts[2].strip()
         unit = parts[3].strip() if len(parts) >= 4 else ""

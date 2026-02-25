@@ -48,7 +48,7 @@ class TestMedsiFallback:
         # universal должен извлечь >= 5 из PARSEABLE_TEXT
         assert len(lines) >= 5, f"Expected >= 5 candidates, got {len(lines)}"
 
-    @patch("parsers.medsi_extractor.medsi_inline_to_candidates", return_value="a\t1\t0-1\tx\nb\t2\t0-2\tx\nc\t3\t0-3\tx\nd\t4\t0-4\tx\ne\t5\t0-5\tx")
+    @patch("parsers.medsi_extractor.medsi_inline_to_candidates", return_value="Гемоглобин\t140\t130-170\tг/л\nЭритроциты\t4.5\t4.0-5.5\tx10^12/л\nЛейкоциты\t6.0\t4-10\tx10^9/л\nТромбоциты\t200\t150-400\tx10^9/л\nСОЭ\t5\t0-20\tмм/час")
     @patch("parsers.lab_detector.detect_lab", side_effect=_mock_detect_medsi)
     def test_medsi_enough_candidates_no_fallback(self, mock_detect, mock_medsi):
         """МЕДСИ вернул 5 кандидатов → fallback НЕ нужен."""
@@ -56,7 +56,7 @@ class TestMedsiFallback:
         lines = result.strip().splitlines() if result else []
         # Должен вернуть 5 кандидатов от МЕДСИ, не от universal
         assert len(lines) == 5
-        assert lines[0].startswith("a\t")
+        assert lines[0].startswith("Гемоглобин\t")
 
 
 class TestHelixFallback:
