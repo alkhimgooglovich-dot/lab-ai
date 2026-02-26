@@ -23,8 +23,17 @@ _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from parsers.line_scorer import score_line, is_noise, has_ref_pattern, has_numeric_value
+from parsers.line_scorer import score_line, is_noise, has_ref_pattern, has_numeric_value, has_known_biomarker
 from parsers.unit_dictionary import normalize_unit, is_valid_unit
+
+
+# ──────────────────────────────────────────────
+# Паттерн "Смотри текст" / "см. текст" / "see text"
+# Показатель БЕЗ числового референса (ref = "")
+# ──────────────────────────────────────────────
+_SEE_TEXT_PATTERN = re.compile(
+    r"\b(?:смотри\s+текст|см\.?\s*текст|see\s+text)\b", re.IGNORECASE
+)
 
 
 # ──────────────────────────────────────────────
@@ -73,6 +82,114 @@ def _extract_ref_text(s: str) -> str:
     return ""
 
 
+# ──────────────────────────────────────────────
+# Фильтр: шкальные аннотации
+# ──────────────────────────────────────────────
+_SCALE_ANNOTATION_STARTS = (
+    "нормальный уровень",
+    "умеренно-повышенный",
+    "умеренно повышенный",
+    "повышенный",
+    "высокий уровень",
+    "высокий риск",
+    "умеренный риск",
+    "риск отсутствует",
+    "нормальное содержание",
+    "диагностический критерий",
+    "рекомендуется консультация",
+    # P6: дополнительные шкальные/методологические фрагменты
+    "в соответствии с",
+    "включительно",
+)
+
+# P6: фразы описания рисков/уровней, которые могут встретиться В ЛЮБОМ месте строки
+_RISK_PHRASES = (
+    "риск отсутствует", "умеренный риск", "высокий риск",
+    "низкий риск", "очень высокий риск",
+    "нормальный уровень", "умеренно-повышенный", "умеренно повышенный",
+    "повышенный уровень", "высокий уровень",
+)
+
+# P6: маркеры лабораторных методологий (не являются биомаркерами)
+_METHODOLOGY_MARKERS = ("dcct", "ngsp", "ifcc", "в соответствии с")
+
+
+def _is_scale_annotation(line: str) -> bool:
+    """
+    Проверяет, является ли строка шкальной аннотацией (пояснением к уровням),
+    а не реальным биомаркером.
+
+    Примеры True:
+        "Нормальный уровень <1,70"
+        "Умеренно-повышенный 1,70-2,25"
+        ">1.45 ммоль/л - риск отсутствует"
+        "0.9-1,45 ммоль/л - умеренный риск"
+
+    Примеры False:
+        "Холестерин общий 4.73 ммоль/л"
+        "Глюкоза 5.27 ммоль/л 4.11 - 6.1"
+    """
+    s = (line or "").strip()
+    if not s:
+        return False
+    low = s.lower()
+
+    # Паттерн 1: строка начинается с описания уровня
+    for prefix in _SCALE_ANNOTATION_STARTS:
+        if low.startswith(prefix):
+            return True
+
+    # Паттерн 2: строка начинается с ">число" или "<число" и содержит текст-описание
+    if re.match(r'^[><≤≥]\s*\d', s):
+        if re.search(r'(риск|уровень|норм)', low):
+            return True
+
+    # Паттерн 3: "число-число ммоль/л - текст описания" (без имени биомаркера)
+    if re.match(r'^\d+[.,]?\d*\s*[-–—]\s*\d+[.,]?\d*\s+\S+\s*[-–—]\s*\w', s):
+        if re.search(r'(риск|уровень|норм)', low):
+            return True
+
+    # Паттерн 4: "до N% ..." или "N.N% и более ..." с описанием уровня/нормы
+    if re.match(r'^до\s+\d', low) and re.search(r'(содержание|уровень|норм|риск|критерий)', low):
+        return True
+    if re.match(r'^\d+[.,]?\d*%\s+(и более|и выше|включительно)', low):
+        if re.search(r'(содержание|уровень|норм|риск|критерий|диабет)', low):
+            return True
+
+    # Паттерн 5: "N.N-N.N% - описание" (напр. "6.0-6.4% - рекомендуется консультация")
+    if re.match(r'^\d+[.,]?\d*\s*[-–—]\s*\d+[.,]?\d*%\s*[-–—]\s*\w', s):
+        if re.search(r'(риск|уровень|норм|консультаци|критерий)', low):
+            return True
+
+    # P7: агрессивные паттерны для HbA1c шкалы (без требования ключевых слов)
+
+    # "6.0-6.4% - рекомендуется консультация" — процентный диапазон в начале строки
+    if re.match(r'^\d+[.,]?\d*\s*[-–—]\s*\d+[.,]?\d*\s*%', s):
+        return True
+
+    # "до N..." в начале строки — шкальная аннотация
+    if re.match(r'^до\s+\d', low):
+        return True
+
+    # "N% и более" в любом месте строки
+    if re.search(r'\d+[.,]?\d*\s*%\s+и\s+более', low):
+        return True
+
+    # Паттерн 6 (P6): строка СОДЕРЖИТ фразу описания риска/уровня в любом месте,
+    # но НЕ содержит известного биомаркера → шкальная аннотация
+    for phrase in _RISK_PHRASES:
+        if phrase in low:
+            if not has_known_biomarker(s):
+                return True
+
+    # Паттерн 7 (P6): строка содержит маркер лабораторной методологии (DCCT, NGSP, IFCC)
+    for marker in _METHODOLOGY_MARKERS:
+        if marker in low:
+            return True
+
+    return False
+
+
 def _starts_like_value_line(s: str) -> bool:
     t = (s or "").strip()
     return bool(re.match(r"^(?:[↑↓+]\s*)?\d", t))
@@ -85,10 +202,22 @@ def _looks_like_name_line(s: str) -> bool:
     low = t.lower()
     if is_noise(t):
         return False
+    if _is_scale_annotation(t):
+        return False
     if _starts_like_value_line(t):
         return False
     if not re.search(r"[A-Za-zА-Яа-я]{2,}", t):
         return False
+
+    # P6/P7: отклонить строки, которые являются ТОЛЬКО указанием биоматериала.
+    # Важно: "Калий (K+) (сыворотка крови)" должно ПРОХОДИТЬ (содержит индикатор),
+    # а "(сыворотка крови)" одна — НЕТ.
+    t_stripped = t.strip().lower().strip("() ")
+    if t_stripped in ("венозная кровь", "сыворотка крови", "капиллярная кровь",
+                      "кровь, фотометрия", "плазма крови", "моча разовая",
+                      "цельная кровь"):
+        return False
+
     return True
 
 
@@ -106,11 +235,52 @@ def _try_parse_one_line(line: str) -> Optional[str]:
         return None
     if is_noise(s):
         return None
+    if _is_scale_annotation(s):
+        return None
     if _starts_like_value_line(s):
         return None
 
     # Нормализуем научную нотацию
     s_norm = _normalize_scientific_notation(s)
+
+    # --- "Смотри текст" — показатель без числового ref ---
+    see_text_match = _SEE_TEXT_PATTERN.search(s_norm)
+    if see_text_match:
+        # Убираем "Смотри текст" и пробуем извлечь name + value + unit
+        s_clean = s_norm[:see_text_match.start()].strip()
+        if not s_clean:
+            return None
+
+        # Нормализуем запятые в числах
+        s_clean_norm = s_clean.replace(",", ".")
+        s_clean_norm = _normalize_scientific_notation(s_clean_norm)
+
+        # Ищем последнее число в строке
+        nums = re.findall(r"[-+]?\d+(?:\.\d+)?", s_clean_norm)
+        if not nums:
+            return None
+
+        value_str = nums[-1]
+        value = _parse_float(value_str)
+        if value is None:
+            return None
+
+        # Имя — всё до значения
+        name_part = s_clean_norm.rsplit(value_str, 1)[0].strip()
+
+        # Единица — всё после значения и до конца
+        after_value = s_clean_norm.split(value_str, 1)[1].strip() if value_str in s_clean_norm else ""
+        unit = ""
+        if after_value:
+            unit_match = re.match(r"^([^/\s]+(?:[/%][^/\s]*)?)", after_value)
+            if unit_match:
+                unit = unit_match.group(1).strip()
+
+        if not name_part or not re.search(r"[A-Za-zА-Яа-я]", name_part):
+            return None
+
+        # ref = "" (нет числового референса, "Смотри текст")
+        return f"{name_part}\t{value:g}\t\t{unit}".strip()
 
     # Ищем референсный диапазон
     range_match = re.search(
@@ -295,6 +465,12 @@ def _multi_line_pass(lines: List[str]) -> List[str]:
             i += 1
             continue
 
+        # Если строка содержит "Смотри текст" — это однострочный кейс с пустым ref,
+        # не ищем ref в следующих строках (иначе зацепим мусорные пояснения).
+        if _SEE_TEXT_PATTERN.search(ln):
+            i += 1
+            continue
+
         # Нашли имя — собираем окно из следующих 1–3 строк
         window = lines[i + 1: i + 4]  # максимум 3 строки после имени
 
@@ -356,6 +532,38 @@ def _multi_line_pass(lines: List[str]) -> List[str]:
             out.append(candidate)
             i += 1 + consumed  # перепрыгиваем использованные строки
             continue
+
+        # P6: если нашли value, но НЕТ ref — проверяем, не стоит ли дальше "Смотри текст"
+        if value_found is not None and not ref_found:
+            next_idx = i + 1 + consumed
+            if next_idx < len(lines) and _SEE_TEXT_PATTERN.search(lines[next_idx]):
+                candidate = f"{ln}\t{value_found:g}\t\t{unit_found}".strip()
+                out.append(candidate)
+                i = next_idx + 1  # перепрыгиваем строку "Смотри текст"
+                continue
+
+        # P6: если value НЕ найдено в окне, но в самой строке-имени есть число,
+        # а следующая строка — "Смотри текст" → извлекаем value из строки-имени
+        if value_found is None and not ref_found:
+            next_check_idx = i + 1
+            if next_check_idx < len(lines) and _SEE_TEXT_PATTERN.search(lines[next_check_idx]):
+                ln_norm = ln.replace(",", ".")
+                ln_norm = _normalize_scientific_notation(ln_norm)
+                nums = re.findall(r"[-+]?\d+(?:\.\d+)?", ln_norm)
+                if nums:
+                    val = _parse_float(nums[-1])
+                    if val is not None:
+                        val_str = nums[-1]
+                        after_val = ln_norm.split(val_str, 1)[-1].strip() if val_str in ln_norm else ""
+                        embedded_unit = ""
+                        if after_val:
+                            u_match = re.match(r"^([A-Za-zА-Яа-яµ%/\.\-]+(?:[/%][^/\s]*)?)", after_val)
+                            if u_match:
+                                embedded_unit = u_match.group(1).strip()
+                        candidate = f"{ln}\t{val:g}\t\t{embedded_unit}".strip()
+                        out.append(candidate)
+                        i = next_check_idx + 1
+                        continue
 
         i += 1
 
@@ -532,13 +740,19 @@ def universal_extract(raw_text: str) -> str:
     lines = _rejoin_broken_units(lines)
     lines = _rejoin_broken_names(lines)
 
+    # ─── Фильтр: шкальные аннотации ───
+    lines = [ln for ln in lines if not _is_scale_annotation(ln)]
+
     # ─── Pass 1: однострочный ───
     one_line_cands: List[str] = []
     for ln in lines:
-        # Скоринг: фильтруем только кандидаты с score >= 0.4
-        sc = score_line(ln)
-        if sc < 0.4:
-            continue
+        # "Смотри текст" — пропускаем score-фильтр (у таких строк нет ref → score < 0.4),
+        # но _try_parse_one_line обработает их отдельно.
+        has_see_text = bool(_SEE_TEXT_PATTERN.search(ln))
+        if not has_see_text:
+            sc = score_line(ln)
+            if sc < 0.4:
+                continue
         cand = _try_parse_one_line(ln)
         if cand:
             one_line_cands.append(cand)

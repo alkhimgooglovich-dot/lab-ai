@@ -138,3 +138,5 @@ class TestRealBiomarkersNotFiltered:
         assert score_line("Гемоглобин") > 0.0
 
 
+
+
