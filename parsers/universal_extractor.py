@@ -183,9 +183,13 @@ def _is_scale_annotation(line: str) -> bool:
                 return True
 
     # Паттерн 7 (P6): строка содержит маркер лабораторной методологии (DCCT, NGSP, IFCC)
+    # P8: НЕ фильтруем, если строка ТАКЖЕ содержит известный биомаркер —
+    # это реальный показатель вида "Гликированный гемоглобин (DCCT) 5.0%"
     for marker in _METHODOLOGY_MARKERS:
         if marker in low:
-            return True
+            if not has_known_biomarker(s):
+                return True
+            break
 
     return False
 
@@ -222,6 +226,34 @@ def _looks_like_name_line(s: str) -> bool:
 
 
 # ──────────────────────────────────────────────
+# P9: Pre-clean — удаление регуляторных кодов перед парсингом
+# ──────────────────────────────────────────────
+def _preclean_line(s: str) -> str:
+    """
+    Удаляет регуляторные коды, коды услуг, указания биоматериала и методологии
+    из строки ПЕРЕД извлечением значения/ref.
+    Предотвращает путаницу чисел в кодах (A09.05.083, 804н) с реальными значениями.
+    """
+    if not s:
+        return s
+    out = re.sub(
+        r'\bA\d{2}\.\d{2}\.\d{3}(?:\.\d+)?(?:\s*,\s*A\d{2}\.\d{2}\.\d{3}(?:\.\d+)?)*',
+        '', s,
+    )
+    out = re.sub(r'\(Приказ[^)]*\)', '', out, flags=re.IGNORECASE)
+    out = re.sub(r'\(Приказ[^)]*$', '', out, flags=re.IGNORECASE)
+    out = re.sub(r'^МЗ\s+РФ[^)]*\)', '', out, flags=re.IGNORECASE)
+    out = re.sub(
+        r'\(\s*(?:венозная кровь|сыворотка крови|кровь[^)]*|капиллярная кровь|плазма крови?)\s*\)',
+        '', out, flags=re.IGNORECASE,
+    )
+    out = re.sub(r'\(в соответствии[^)]*\)', '', out, flags=re.IGNORECASE)
+    out = re.sub(r'Дата исследования[:\s]*[\d.]+[;\s]*', '', out, flags=re.IGNORECASE)
+    out = re.sub(r'\s+', ' ', out).strip()
+    return out
+
+
+# ──────────────────────────────────────────────
 # Pass 1: однострочный парсер
 # ──────────────────────────────────────────────
 def _try_parse_one_line(line: str) -> Optional[str]:
@@ -238,6 +270,11 @@ def _try_parse_one_line(line: str) -> Optional[str]:
     if _is_scale_annotation(s):
         return None
     if _starts_like_value_line(s):
+        return None
+
+    # P9: Pre-clean regulatory codes before value/ref extraction
+    s = _preclean_line(s)
+    if not s or len(s) < 3:
         return None
 
     # Нормализуем научную нотацию
@@ -320,9 +357,10 @@ def _try_parse_one_line(line: str) -> Optional[str]:
     left_norm = left.replace(",", ".")
     left_norm = _normalize_scientific_notation(left_norm)
 
-    # Сначала: формат *10^N
+    # Сначала: формат *10^N (включая x10^N из pypdf после P10-склейки)
     pow_patterns = [
         r"([-+]?\d+(?:[.,]\d+)?)\s*\*\s*10\s*\^\s*(\d+)",
+        r"([-+]?\d+(?:[.,]\d+)?)[-+]?\s+[xхXХ]\*?10\s*\^\s*(\d+)",
         r"([-+]?\d+(?:[.,]\d+)?)\s+10\s*\^\s*(\d+)",
     ]
     pow_match = None
@@ -411,9 +449,10 @@ def _parse_value_unit_from_line(s: str) -> Tuple[Optional[float], str]:
     t = re.sub(r"^(\d+(?:[.,]\d+)?)\s*-$", r"\1", t)
     t = _normalize_scientific_notation(t)
 
-    # *10^N
+    # *10^N (включая x10^N из pypdf после P10-склейки)
     pow_patterns = [
         r"([-+]?\d+(?:[.,]\d+)?)\s*\*\s*10\s*\^\s*(\d+)(.*)$",
+        r"([-+]?\d+(?:[.,]\d+)?)[-+]?\s+[xхXХ]\*?10\s*\^\s*(\d+)(.*)$",
         r"([-+]?\d+(?:[.,]\d+)?)\s+10\s*\^\s*(\d+)(.*)$",
     ]
     for pattern in pow_patterns:
@@ -471,6 +510,12 @@ def _multi_line_pass(lines: List[str]) -> List[str]:
             i += 1
             continue
 
+        # P9: Очищаем имя от регуляторных кодов для формирования кандидата
+        name_clean = _preclean_line(ln)
+        if not name_clean:
+            i += 1
+            continue
+
         # Нашли имя — собираем окно из следующих 1–3 строк
         window = lines[i + 1: i + 4]  # максимум 3 строки после имени
 
@@ -484,8 +529,15 @@ def _multi_line_pass(lines: List[str]) -> List[str]:
             if not w_stripped:
                 continue  # пустая строка → пропуск
 
+            # P9: Pre-clean regulatory codes in window lines
+            w_stripped = _preclean_line(w_stripped)
+            if not w_stripped:
+                consumed = j + 1
+                continue  # строка содержала только регуляторный код → пропуск
+
             # Если строка — noise, но НЕ числовая → пропускаем (не ломаем окно)
             if is_noise(w_stripped) and not re.match(r'^[↑↓+]?\s*\d', w_stripped):
+                consumed = j + 1
                 continue
 
             # Если встретили строку-имя, которая НЕ является единицей → СТОП
@@ -528,7 +580,7 @@ def _multi_line_pass(lines: List[str]) -> List[str]:
 
         # Формируем кандидата: обязательны value + ref
         if value_found is not None and ref_found:
-            candidate = f"{ln}\t{value_found:g}\t{ref_found}\t{unit_found}".strip()
+            candidate = f"{name_clean}\t{value_found:g}\t{ref_found}\t{unit_found}".strip()
             out.append(candidate)
             i += 1 + consumed  # перепрыгиваем использованные строки
             continue
@@ -537,7 +589,7 @@ def _multi_line_pass(lines: List[str]) -> List[str]:
         if value_found is not None and not ref_found:
             next_idx = i + 1 + consumed
             if next_idx < len(lines) and _SEE_TEXT_PATTERN.search(lines[next_idx]):
-                candidate = f"{ln}\t{value_found:g}\t\t{unit_found}".strip()
+                candidate = f"{name_clean}\t{value_found:g}\t\t{unit_found}".strip()
                 out.append(candidate)
                 i = next_idx + 1  # перепрыгиваем строку "Смотри текст"
                 continue
@@ -547,7 +599,7 @@ def _multi_line_pass(lines: List[str]) -> List[str]:
         if value_found is None and not ref_found:
             next_check_idx = i + 1
             if next_check_idx < len(lines) and _SEE_TEXT_PATTERN.search(lines[next_check_idx]):
-                ln_norm = ln.replace(",", ".")
+                ln_norm = name_clean.replace(",", ".")
                 ln_norm = _normalize_scientific_notation(ln_norm)
                 nums = re.findall(r"[-+]?\d+(?:\.\d+)?", ln_norm)
                 if nums:
@@ -560,7 +612,7 @@ def _multi_line_pass(lines: List[str]) -> List[str]:
                             u_match = re.match(r"^([A-Za-zА-Яа-яµ%/\.\-]+(?:[/%][^/\s]*)?)", after_val)
                             if u_match:
                                 embedded_unit = u_match.group(1).strip()
-                        candidate = f"{ln}\t{val:g}\t\t{embedded_unit}".strip()
+                        candidate = f"{name_clean}\t{val:g}\t\t{embedded_unit}".strip()
                         out.append(candidate)
                         i = next_check_idx + 1
                         continue
@@ -710,6 +762,190 @@ def _rejoin_broken_names(lines: List[str]) -> List[str]:
 
 
 # ──────────────────────────────────────────────
+# P10: Rejoin fragmented pypdf lines
+# ──────────────────────────────────────────────
+
+def _is_discardable_fragment(s: str) -> bool:
+    """P10: Строки, которые полностью отбрасываются при склейке фрагментов."""
+    low = (s or "").strip().lower()
+    if not low:
+        return True
+
+    # Service codes: A09.05.XXX (одиночные и через запятую)
+    if re.match(r'^a\d{2}\.\d{2}\.\d{3}', low):
+        return True
+
+    # Regulatory: ТОЛЬКО автономные фрагменты (не полные строки-показатели)
+    if re.match(r'^\(?приказ', low):
+        return True
+    if low.startswith('мз рф') or low.startswith('мз  рф'):
+        return True
+    if low.strip() == '№' or re.match(r'^№\s*$', low):
+        return True
+    if re.match(r'^\d{3,4}(?:н\)?|\))\s*$', low):
+        return True
+
+    # Biomaterial in parentheses — standalone
+    if low.strip('() ') in (
+        'венозная кровь', 'сыворотка крови', 'капиллярная кровь',
+        'кровь, фотометрия', 'плазма крови', 'цельная кровь',
+        'моча разовая',
+    ):
+        return True
+
+    if low.startswith('дата исследования'):
+        return True
+    if low.startswith('клинические рекомендации'):
+        return True
+    if low.startswith('в соответствии') or low in ('dcct', 'ngsp', 'ifcc'):
+        return True
+
+    # Scale / risk descriptions
+    if any(x in low for x in (
+        'нормальный уровень', 'умеренно-повышенный', 'умеренно повышенный',
+        'повышенный уровень', 'высокий уровень',
+        'риск отсутствует', 'умеренный риск', 'высокий риск', 'низкий риск',
+        'нормальное содержание', 'диагностический критерий',
+        'рекомендуется консультация',
+    )):
+        return True
+
+    # Boilerplate
+    if any(x in low for x in (
+        'результат лабораторных', 'получая данный результат',
+        'заведующий лабораторией', 'печать:', 'страница',
+        'лабораторный комплекс', 'гост', 'сертификат',
+        'направляющий врач', 'дата регистрации',
+        'адрес пациента', 'пол пациента',
+        'номер истории', 'диагноз',
+        'расчетный показатель', 'концентрация железа',
+        'проведено методом',
+    )):
+        return True
+
+    return False
+
+
+def _is_unit_only(s: str) -> bool:
+    """P10: Строка является ТОЛЬКО единицей измерения."""
+    t = (s or "").strip()
+    if not t or len(t) > 20:
+        return False
+    if re.match(
+        r'^(?:ммоль/л|мкмоль/л|г/л|мг/л|мг/дл|Ед/л|МЕ/л|мл/мин|нг/мл|'
+        r'пмоль/л|нмоль/л|%|фл|пг|г/дл|мм/ч(?:ас)?|тыс/мкл|млн/мкл|'
+        r'10\^[39]/л|[xхXХ]?\*?10[\^*]?\d+/[а-яa-z]+)\s*$',
+        t, re.IGNORECASE,
+    ):
+        return True
+    # Broken unit fragments: "x10*12/", "x10*9/" (ending with /)
+    if re.match(r'^[xхXХ]?\*?10[\^*]\d+/\s*$', t, re.IGNORECASE):
+        return True
+    return False
+
+
+def _is_ref_range_line(s: str) -> bool:
+    """P10: Строка является отдельным референсным диапазоном."""
+    t = (s or "").strip()
+    if not t:
+        return False
+    if re.match(r'^\d+(?:[.,]\d+)?\s*[-–—]\s*\d+(?:[.,]\d+)?$', t):
+        return True
+    if re.match(r'^(?:<=|>=|<|>|≤|≥)\s*\d+(?:[.,]\d+)?\s*$', t):
+        return True
+    return False
+
+
+def _rejoin_fragmented_lines(lines: list[str]) -> list[str]:
+    """
+    P10: Склеивает строки, разбитые pypdf, в логические строки-показатели.
+
+    Gemotest PDF text layer часто разбивает один показатель на 7-10 строк:
+        Калий / (K+) / (сыворотка крови) / A09.05.034 / ... / 3.7 / ммоль/л / 3.5 - 5.1
+
+    Здесь собираем фрагменты обратно: «Калий (K+) 3.7 ммоль/л 3.5 - 5.1».
+
+    Буфер сбрасывается только при появлении нового имени показателя,
+    строки «Смотри текст» или конца входа.
+    """
+    out: list[str] = []
+    buf: list[str] = []
+
+    for ln in lines:
+        stripped = ln.strip()
+
+        if not stripped:
+            continue
+        if _is_discardable_fragment(stripped):
+            continue
+
+        # 1. «Смотри текст» → add to buf + flush
+        if _SEE_TEXT_PATTERN.search(stripped):
+            buf.append(stripped)
+            if buf:
+                out.append(' '.join(buf))
+            buf = []
+            continue
+
+        # 2. Unit-only → add to buf
+        if _is_unit_only(stripped):
+            buf.append(stripped)
+            continue
+
+        # 3. Value-like or comparison (цифра / < / > / ≤ / ≥) → add to buf
+        if re.match(r'^[-+↑↓]?\s*\d', stripped) or re.match(r'^[<>≤≥]', stripped):
+            buf.append(stripped)
+            continue
+
+        # 4. Name-like (начинается с буквы) → flush old buf, start new
+        if re.match(r'^[A-ZА-ЯЁa-zа-яё]', stripped):
+            if buf:
+                out.append(' '.join(buf))
+            cleaned = re.sub(
+                r'\s*\(?Приказ[^)]*$', '', stripped, flags=re.IGNORECASE,
+            ).strip()
+            buf = [cleaned or stripped]
+            continue
+
+        # 5. Lab code in parentheses: (K+), (Na+), (АЛТ), (ЛДГ)
+        if re.match(r'^\([A-ZА-Яа-яa-z+\d]{1,6}\)$', stripped):
+            buf.append(stripped)
+            continue
+
+        # 6. Всё остальное — в буфер
+        buf.append(stripped)
+
+    if buf:
+        out.append(' '.join(buf))
+
+    return out
+
+
+# ──────────────────────────────────────────────
+# P11: Strip Gemotest +/- out-of-range markers
+# ──────────────────────────────────────────────
+def _strip_gemotest_markers(lines: list[str]) -> list[str]:
+    """
+    Gemotest помечает выход за референс знаками + / - после числа:
+    «53+», «71.0-», «92.3+».  После склейки строк это даёт «53+ г/л»,
+    и парсер захватывает «+» как единицу.
+
+    Здесь аккуратно убираем маркеры, не трогая референсные диапазоны
+    вроде «3.5-5.1» и операторы «< 41».
+    """
+    out = []
+    for ln in lines:
+        # "53+ г/л" → "53 г/л"  (+ перед пробелом)
+        cleaned = re.sub(r'(\d+\.?\d*)\+(?=\s|$)', r'\1', ln)
+        # "71.0- мкмоль/л" → "71.0 мкмоль/л"  (- перед пробелом+буквой)
+        cleaned = re.sub(r'(\d+\.?\d*)-(?=\s+[А-Яа-яA-Za-z%])', r'\1', cleaned)
+        # "71.0-" в конце строки
+        cleaned = re.sub(r'(\d+\.?\d*)-$', r'\1', cleaned)
+        out.append(cleaned)
+    return out
+
+
+# ──────────────────────────────────────────────
 # ГЛАВНАЯ ФУНКЦИЯ
 # ──────────────────────────────────────────────
 def universal_extract(raw_text: str) -> str:
@@ -736,8 +972,16 @@ def universal_extract(raw_text: str) -> str:
     if not lines:
         return ""
 
-    # ─── Предобработка: склейка разбитых pypdf-строк ───
+    # ─── Предобработка: склейка разбитых единиц (x10*12/ + л) ───
     lines = _rejoin_broken_units(lines)
+
+    # ─── P10: склейка фрагментированных pypdf-строк ───
+    lines = _rejoin_fragmented_lines(lines)
+
+    # ─── P11: убираем Gemotest +/- маркеры из значений ───
+    lines = _strip_gemotest_markers(lines)
+
+    # ─── Предобработка: склейка разбитых имён ───
     lines = _rejoin_broken_names(lines)
 
     # ─── Фильтр: шкальные аннотации ───
@@ -746,10 +990,10 @@ def universal_extract(raw_text: str) -> str:
     # ─── Pass 1: однострочный ───
     one_line_cands: List[str] = []
     for ln in lines:
-        # "Смотри текст" — пропускаем score-фильтр (у таких строк нет ref → score < 0.4),
-        # но _try_parse_one_line обработает их отдельно.
+        # "Смотри текст" и строки с известным биомаркером обходят score-фильтр
         has_see_text = bool(_SEE_TEXT_PATTERN.search(ln))
-        if not has_see_text:
+        has_biomarker = has_known_biomarker(ln)
+        if not has_see_text and not has_biomarker:
             sc = score_line(ln)
             if sc < 0.4:
                 continue

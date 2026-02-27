@@ -189,3 +189,4 @@ class TestGemotestIntegration:
         text_lower = candidates.lower() if candidates else ""
         assert "аст" in text_lower or "аспартат" in text_lower, "АСТ пропал из кандидатов"
 
+

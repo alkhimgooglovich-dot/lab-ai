@@ -109,3 +109,4 @@ class TestSanitizeRawName:
         assert "фотометрия" not in result
         assert "Кальций общий" in result
 
+

@@ -136,3 +136,4 @@ class TestIntegrationP7:
             assert "рекомендуется консультация" not in name
             assert "нормальное содержание" not in name
 
+

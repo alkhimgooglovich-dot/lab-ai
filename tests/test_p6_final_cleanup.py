@@ -230,3 +230,4 @@ class TestFullGemotestCleanup:
         lower = (candidates or "").lower()
         assert "холестерин общ" in lower or "4.73" in candidates
 
+

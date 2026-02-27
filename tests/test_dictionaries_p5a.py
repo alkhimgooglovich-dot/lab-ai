@@ -130,3 +130,4 @@ class TestNormalizeNameNewMarkers:
         """Обычный гемоглобин по-прежнему HGB (регрессия)."""
         assert normalize_name("Гемоглобин (HGB)") == "HGB"
 
+

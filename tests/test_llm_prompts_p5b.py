@@ -181,3 +181,4 @@ class TestBuildFallbackText:
         text = build_fallback_text("м", 60, items, [])
         assert "отклонений не обнаружено" in text.lower()
 
+
