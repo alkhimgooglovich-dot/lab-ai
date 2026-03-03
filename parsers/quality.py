@@ -53,9 +53,12 @@ def _is_suspicious_item(it: "Item") -> bool:
       - raw_name содержит '^' '*' '/' (кроме *10^N)
       - ref_text невалидный (слишком длинный, склейки)
     """
-    # Проверка raw_name на мусор
+    # Проверка raw_name на мусор.
+    # Strip parenthesized codes first — biomarker codes like (DCCT/NGSP),
+    # (HBA1c, IFCC), (ЛПВП, HDL) legitimately contain '/' and are not garbage.
     raw = it.raw_name or ""
-    if any(ch in raw for ch in ['^', '*', '/']):
+    raw_no_parens = re.sub(r"\([^)]*\)", "", raw)
+    if any(ch in raw_no_parens for ch in ['^', '*', '/']):
         if not re.search(r"\*10\^\d+", raw):
             return True
 

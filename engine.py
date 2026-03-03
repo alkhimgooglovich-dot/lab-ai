@@ -792,6 +792,8 @@ RUS_NAME_MAP = {
     "холестерин-лпнп": "LDL",
     "холестерин липопротеинов высокой плотности": "HDL",
     "холестерин-лпвп": "HDL",
+    "холестерин не-лпвп": "NON_HDL_CHOL",
+    "не-лпвп": "NON_HDL_CHOL",
     "холестерин общ": "CHOL",
     "индекс атерогенности": "AI",
     "билирубин общ": "TBIL",
@@ -1902,6 +1904,9 @@ def deduplicate_items(items: List[Item]) -> List[Item]:
       3) наличие unit (unit непустой — лучше)
     Остальные отбрасываем.
 
+    HBA1C special case: prefer DCCT/NGSP (%) over IFCC (mmol/mol) —
+    clinicians universally use the percentage format.
+
     Возвращает (deduplicated_items, dropped_count).
     """
     from collections import defaultdict
@@ -1915,6 +1920,14 @@ def deduplicate_items(items: List[Item]) -> List[Item]:
         if len(group) == 1:
             result.append(group[0])
             continue
+        # HBA1C: prefer DCCT/NGSP (%) over IFCC (mmol/mol)
+        if name == "HBA1C" and len(group) > 1:
+            dcct = [it for it in group
+                    if re.search(r'(?i)\b(DCCT|NGSP)\b', it.raw_name or '')]
+            if dcct:
+                result.append(dcct[0])
+                dropped += len(group) - 1
+                continue
         # Сортируем: лучший первый
         group.sort(key=lambda it: (
             getattr(it, 'confidence', 0.0),
@@ -2585,6 +2598,33 @@ def extract_text_from_upload(
     return candidates.strip() if candidates.strip() else (plain or "").strip()
 
 
+# Citilab interpretation-based fallback refs for biomarkers with "см. интерпретацию".
+# Applied only when ref is None — never overrides lab-provided references.
+_FALLBACK_REFS: dict[str, Range] = {
+    # HDL: Citilab scale "> 1.45 — no coronary risk"
+    "HDL": Range(low=1.45, high=None),
+}
+
+
+def _apply_fallback_refs(items: List[Item]) -> None:
+    """Assign fallback reference ranges to items with ref=None (in-place).
+
+    Only applies to known biomarkers listed in _FALLBACK_REFS.
+    Updates ref, ref_text, ref_source, and recalculates status.
+    """
+    for it in items:
+        if it.ref is not None:
+            continue
+        fallback = _FALLBACK_REFS.get(it.name)
+        if fallback is None:
+            continue
+        it.ref = fallback
+        it.ref_text = format_range(fallback)
+        it.ref_source = "интерпретация лаборатории"
+        it.status = status_by_range(it.value, fallback)
+        _dbg(f"fallback_ref: {it.name}={it.value} => ref={it.ref_text}, status={it.status}")
+
+
 # ==========================
 # B2: вспомогательные функции для OCR rerun
 # ==========================
@@ -2617,6 +2657,7 @@ def _run_parse_pipeline(raw_text: str):
 
     assign_confidence(items)
     items, dedup_dropped = deduplicate_items(items)
+    _apply_fallback_refs(items)
     items, outlier_count = apply_sanity_filter(items)
 
     quality = evaluate_parse_quality(
