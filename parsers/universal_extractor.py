@@ -35,6 +35,13 @@ _SEE_TEXT_PATTERN = re.compile(
     r"\b(?:смотри\s+текст|см\.?\s*текст|see\s+text)\b", re.IGNORECASE
 )
 
+# P13: Расширенный паттерн — включает "см. интерпретацию" (Citilab HDL)
+_SEE_TEXT_BROAD = re.compile(
+    r"\b(?:смотри\s+текст|см\.?\s*текст|see\s+text"
+    r"|см\.?\s*интерпретаци[юи])\b",
+    re.IGNORECASE,
+)
+
 
 # ──────────────────────────────────────────────
 # Вспомогательные функции (не дублируем engine.py,
@@ -280,44 +287,53 @@ def _try_parse_one_line(line: str) -> Optional[str]:
     # Нормализуем научную нотацию
     s_norm = _normalize_scientific_notation(s)
 
-    # --- "Смотри текст" — показатель без числового ref ---
-    see_text_match = _SEE_TEXT_PATTERN.search(s_norm)
+    # --- "Смотри текст" / "см. интерпретацию" — показатель без числового ref ---
+    see_text_match = _SEE_TEXT_BROAD.search(s_norm)
     if see_text_match:
-        # Убираем "Смотри текст" и пробуем извлечь name + value + unit
         s_clean = s_norm[:see_text_match.start()].strip()
         if not s_clean:
             return None
 
-        # Нормализуем запятые в числах
         s_clean_norm = s_clean.replace(",", ".")
         s_clean_norm = _normalize_scientific_notation(s_clean_norm)
 
-        # Ищем последнее число в строке
         nums = re.findall(r"[-+]?\d+(?:\.\d+)?", s_clean_norm)
-        if not nums:
-            return None
 
-        value_str = nums[-1]
-        value = _parse_float(value_str)
-        if value is None:
-            return None
+        if nums:
+            # Value BEFORE see-text marker (e.g. "Холестерин 4.73 см. текст")
+            value_str = nums[-1]
+            value = _parse_float(value_str)
+            if value is None:
+                return None
+            name_part = s_clean_norm.rsplit(value_str, 1)[0].strip()
+            after_value = s_clean_norm.split(value_str, 1)[1].strip() if value_str in s_clean_norm else ""
+            unit = ""
+            if after_value:
+                unit_match = re.match(r"^([^/\s]+(?:[/%][^/\s]*)?)", after_value)
+                if unit_match:
+                    unit = unit_match.group(1).strip()
+            if not name_part or not re.search(r"[A-Za-zА-Яа-я]", name_part):
+                return None
+            return f"{name_part}\t{value:g}\t\t{unit}"
 
-        # Имя — всё до значения
-        name_part = s_clean_norm.rsplit(value_str, 1)[0].strip()
+        # Value AFTER see-text marker (e.g. "ЛПВП (HDL) см. интерпретацию 1.567")
+        s_after = s_norm[see_text_match.end():].strip()
+        if s_after:
+            s_after_norm = s_after.replace(",", ".")
+            nums_after = re.findall(r"[-+]?\d+(?:\.\d+)?", s_after_norm)
+            if nums_after:
+                value_str = nums_after[-1]
+                # Strip trailing lab code from bare see-text value: "1.567" → "1.56"
+                m_code = re.match(r'(\d+\.\d{2})\d+$', value_str)
+                if m_code:
+                    value_str = m_code.group(1)
+                value = _parse_float(value_str)
+                if value is not None:
+                    name_part = s_clean
+                    if name_part and re.search(r"[A-Za-zА-Яа-я]", name_part):
+                        return f"{name_part}\t{value:g}\t\t"
 
-        # Единица — всё после значения и до конца
-        after_value = s_clean_norm.split(value_str, 1)[1].strip() if value_str in s_clean_norm else ""
-        unit = ""
-        if after_value:
-            unit_match = re.match(r"^([^/\s]+(?:[/%][^/\s]*)?)", after_value)
-            if unit_match:
-                unit = unit_match.group(1).strip()
-
-        if not name_part or not re.search(r"[A-Za-zА-Яа-я]", name_part):
-            return None
-
-        # ref = "" (нет числового референса, "Смотри текст")
-        return f"{name_part}\t{value:g}\t\t{unit}".strip()
+        return None
 
     # Ищем референсный диапазон
     range_match = re.search(
@@ -699,6 +715,109 @@ def _dedup_candidates(candidates: List[str]) -> List[str]:
 
 
 # ──────────────────────────────────────────────
+# Pre-clean: Citilab-style format (prefix units, trailing lab codes, asterisks)
+# ──────────────────────────────────────────────
+
+def _strip_prefix_unit(line: str) -> str:
+    """
+    Strip unit prefix glued directly to biomarker name in Citilab PDFs.
+    E.g. '10^9/лЛейкоциты (WBC) ...' → 'Лейкоциты (WBC) ...'
+         'г/лГемоглобин ...' → 'Гемоглобин ...'
+         '%Гематокрит ...' → 'Гематокрит ...'
+    Only strips when next char after unit is uppercase (start of name).
+    """
+    m = re.match(
+        r'^(10\s*\^?\s*\d{1,2}\s*/\s*[а-яa-z]+'
+        r'|[а-яА-Яa-zA-Z]{1,6}/[а-яa-z]+'
+        r'|МЕ/[а-яa-z]+'
+        r'|мм/ч(?:ас)?'
+        r'|%|фл|пг)',
+        line
+    )
+    if m:
+        rest = line[m.end():]
+        if rest and rest[0].isupper():
+            return rest
+    return line
+
+
+def _strip_trailing_lab_code(line: str) -> str:
+    """
+    Remove trailing lab service code appended to reference range (Citilab).
+    Uses decimal precision of the low bound to determine where the high bound
+    ends and the lab code begins.
+    '... 3.89 - 9.231001' → '... 3.89 - 9.23'  (low 2dec → high 2dec)
+    '... 62.0 - 106.04'   → '... 62.0 - 106.0'  (low 1dec → high 1dec)
+    '... 0.010 - 0.0901001' → '... 0.010 - 0.090' (low 3dec → high 3dec)
+    """
+    # Range: "low.DDD - high.DDDCCC" at end of line
+    m = re.search(
+        r'(\d+)\.(\d+)\s*[-–—]\s*(\d+)\.(\d+)\s*$',
+        line
+    )
+    if m:
+        low_dec_len = len(m.group(2))
+        high_dec_str = m.group(4)
+        if len(high_dec_str) > low_dec_len:
+            cut_pos = m.start(4) + low_dec_len
+            return line[:cut_pos]
+        return line
+
+    # Comparison: "<|>|<=|>=|≤|≥ number.DDCCC" at end of line
+    m = re.search(
+        r'([<>≤≥]=?)\s*(\d+\.\d{2})(\d{1,5})\s*$',
+        line
+    )
+    if m:
+        return line[:m.start(3)]
+
+    return line
+
+
+def _strip_asterisk_marker(line: str) -> str:
+    """Remove asterisk (*) after numeric values: '5.32*' → '5.32'"""
+    return re.sub(r'(\d)\*(?=\s|$|[а-яА-Яa-zA-Z])', r'\1', line)
+
+
+def _strip_direct_determination(line: str) -> str:
+    """
+    Remove '- прямое определение' from Citilab LDL-style names.
+    Full pattern: '(ЛПНП, LDL) - прямое определение 1.83' → '(ЛПНП, LDL) 1.83'
+    Split case: '(ЛПНП, LDL) - прямое' at end → '(ЛПНП, LDL)'
+               'определение 1.83 ...' at start → '1.83 ...'
+    """
+    out = re.sub(r'\s*-\s*прямое\s+определение\b', '', line, flags=re.IGNORECASE)
+    out = re.sub(r'\s*-\s*прямое\s*$', '', out, flags=re.IGNORECASE)
+    out = re.sub(r'^определение\s+(?=\d)', '', out, flags=re.IGNORECASE)
+    return out
+
+
+def _preclean_citilab_format(lines: List[str]) -> List[str]:
+    """
+    Pre-clean lines from Citilab-style PDF format:
+    1. Strip unit prefix glued to biomarker name
+    2. Strip trailing lab service code from reference range
+    3. Strip asterisk (*) after numeric values
+    Safe to apply universally — patterns are specific enough.
+    """
+    out = []
+    changed = 0
+    for ln in lines:
+        original = ln
+        ln = _strip_prefix_unit(ln)
+        ln = _strip_trailing_lab_code(ln)
+        ln = _strip_asterisk_marker(ln)
+        ln = _strip_direct_determination(ln)
+        if ln != original:
+            changed += 1
+        out.append(ln)
+    if changed > 0:
+        print(f"[DEBUG] _preclean_citilab_format: modified {changed}/{len(lines)} lines",
+              file=sys.stderr)
+    return out
+
+
+# ──────────────────────────────────────────────
 # Предобработка: склейка разбитых pypdf-строк
 # ──────────────────────────────────────────────
 def _rejoin_broken_units(lines: List[str]) -> List[str]:
@@ -762,6 +881,36 @@ def _rejoin_broken_names(lines: List[str]) -> List[str]:
 
 
 # ──────────────────────────────────────────────
+# P13: Rejoin lines with unclosed parentheses
+# ──────────────────────────────────────────────
+
+def _rejoin_open_parens(lines: List[str]) -> List[str]:
+    """
+    Rejoin lines where a parenthesis was opened but not closed.
+
+    pypdf sometimes splits: 'Гликозилированный гемоглобин (HBA1c,'
+                            'DCCT/NGSP)'
+    → 'Гликозилированный гемоглобин (HBA1c, DCCT/NGSP)'
+    """
+    result: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        open_count = line.count('(')
+        close_count = line.count(')')
+        joins = 0
+        while open_count > close_count and i + 1 < len(lines) and joins < 5:
+            i += 1
+            line = line.rstrip() + ' ' + lines[i].strip()
+            open_count = line.count('(')
+            close_count = line.count(')')
+            joins += 1
+        result.append(line)
+        i += 1
+    return result
+
+
+# ──────────────────────────────────────────────
 # P10: Rejoin fragmented pypdf lines
 # ──────────────────────────────────────────────
 
@@ -798,6 +947,10 @@ def _is_discardable_fragment(s: str) -> bool:
     if low.startswith('клинические рекомендации'):
         return True
     if low.startswith('в соответствии') or low in ('dcct', 'ngsp', 'ifcc'):
+        return True
+
+    # P13: standalone fragments from split "- прямое определение" / "см. интерпретацию результата"
+    if low in ('определение', 'результата'):
         return True
 
     # Scale / risk descriptions
@@ -975,6 +1128,14 @@ def universal_extract(raw_text: str) -> str:
     # ─── Предобработка: склейка разбитых единиц (x10*12/ + л) ───
     lines = _rejoin_broken_units(lines)
 
+    # ─── Pre-clean Citilab-style format (prefix units, trailing codes, asterisks) ───
+    # Must run BEFORE _rejoin_fragmented_lines: lines like "10^9/лЛейкоциты ..."
+    # start with a digit and would be mis-classified as value-lines by P10.
+    lines = _preclean_citilab_format(lines)
+
+    # ─── P13: склейка строк с незакрытыми скобками (HBA1c, DCCT/NGSP) ───
+    lines = _rejoin_open_parens(lines)
+
     # ─── P10: склейка фрагментированных pypdf-строк ───
     lines = _rejoin_fragmented_lines(lines)
 
@@ -990,8 +1151,8 @@ def universal_extract(raw_text: str) -> str:
     # ─── Pass 1: однострочный ───
     one_line_cands: List[str] = []
     for ln in lines:
-        # "Смотри текст" и строки с известным биомаркером обходят score-фильтр
-        has_see_text = bool(_SEE_TEXT_PATTERN.search(ln))
+        # "Смотри текст" / "см. интерпретацию" и строки с известным биомаркером обходят score-фильтр
+        has_see_text = bool(_SEE_TEXT_BROAD.search(ln))
         has_biomarker = has_known_biomarker(ln)
         if not has_see_text and not has_biomarker:
             sc = score_line(ln)
@@ -1008,5 +1169,5 @@ def universal_extract(raw_text: str) -> str:
     # Многострочный приоритетнее (первым в списке)
     merged = _dedup_candidates(multi_line_cands + one_line_cands)
 
-    return "\n".join(merged).strip()
+    return "\n".join(merged).strip('\n\r ')
 

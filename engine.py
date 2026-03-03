@@ -671,6 +671,9 @@ ALIASES = {
     "PLT": "PLT", "PDW": "PDW", "MPV": "MPV", "P-LCR": "P-LCR",
     "NE": "NE", "LY": "LY", "MO": "MO", "EO": "EO", "BA": "BA",
     "NE%": "NE%", "LY%": "LY%", "MO%": "MO%", "EO%": "EO%", "BA%": "BA%",
+    "LYMF": "LY", "LYMF%": "LY%",
+    "MON": "MO", "MON%": "MO%",
+    "EOS": "EO", "EOS%": "EO%",
     "ESR": "ESR",
     # Новые алиасы P5-A
     "TSH": "TSH", "FT3": "FT3", "FT4": "FT4", "T3": "T3", "T4": "T4",
@@ -957,14 +960,27 @@ def _is_garbage_name(name: str) -> bool:
     if re.match(r'^hba?\s*$', low):
         return True
 
-    # Фрагменты регуляторных кодов / методологий
+    # Фрагменты регуляторных кодов
     _garbage_patterns = [
         "мз рф", "приказ", "№ 804", "a09.", "a12.",
-        "dcct", "ngsp", "ifcc",
     ]
     for pat in _garbage_patterns:
         if pat in low:
             return True
+
+    # Citilab: "определение" / "прямое определение" как самостоятельное имя — мусор
+    if low in ("определение", "прямое определение"):
+        return True
+
+    # Методологические маркеры — мусор только если НЕТ известного биомаркера рядом
+    # (напр. "Гликозилированный гемоглобин (HBA1c, DCCT/NGSP)" — НЕ мусор)
+    from parsers.line_scorer import has_known_biomarker
+    _methodology_garbage = ["dcct", "ngsp", "ifcc"]
+    for pat in _methodology_garbage:
+        if pat in low:
+            if not has_known_biomarker(s):
+                return True
+            break
 
     # Имя состоит ТОЛЬКО из единицы измерения (ммоль/л, Ед/л, г/л и т.д.)
     from parsers.line_scorer import is_unit_only_line
@@ -982,11 +998,22 @@ def _is_garbage_name(name: str) -> bool:
 def normalize_name(raw: str) -> str:
     s = re.sub(r"\s+", " ", (raw or "").strip())
 
-    # коды в скобках (если они были в исходном raw_name до clean_raw_name)
-    m = re.search(r"\(([A-Za-zА-ЯЁа-яё]{2,6}%?)\)", s)
+    # коды в скобках: (Ne), (RDW-SD), (WBC), (P-LCR), (HBA1c) и т.п.
+    m = re.search(r"\(([A-Za-zА-ЯЁа-яё][A-Za-zА-ЯЁа-яё0-9%-]{1,9})\)", s)
     if m:
         code = m.group(1).upper()
+        after_paren = s[m.end():].strip().lstrip(',.;').strip()
+        if after_paren.startswith('%'):
+            if not code.endswith('%'):
+                code = code + '%'
         return ALIASES.get(code, code)
+
+    # Коды с запятой в скобках: (HBA1c, DCCT/NGSP), (ЛПНП, LDL)
+    m_comma = re.search(r"\(([A-Za-zА-ЯЁа-яё0-9][A-Za-zА-ЯЁа-яё0-9%-]{0,9})\s*,", s)
+    if m_comma:
+        code = m_comma.group(1).upper()
+        if code in ALIASES:
+            return ALIASES[code]
 
     low = s.lower()
 
@@ -1533,6 +1560,16 @@ def _smart_to_candidates(raw_text: str) -> str:
             _dbg(f"_smart_to_candidates: MEDSI → {len(candidates.splitlines()) if candidates.strip() else 0} candidates (raw {cand_count})")
             return candidates
         _dbg(f"_smart_to_candidates: MEDSI returned only {cand_count} candidates, falling back to universal")
+
+    # ─── CITILAB (→ universal with pre-clean) ───
+    if det.lab_type == LabType.CITILAB:
+        cleaned_text = _prestrip_interstitial_noise(raw_text)
+        candidates = universal_extract(cleaned_text)
+        if candidates:
+            candidates = _filter_noise_candidates(candidates)
+            _dbg(f"_smart_to_candidates: CITILAB (universal) → {len(candidates.splitlines())} candidates")
+            return candidates
+        _dbg("_smart_to_candidates: CITILAB (universal) empty, falling back")
 
     # ─── HELIX ───
     if det.lab_type == LabType.HELIX:

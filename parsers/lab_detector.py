@@ -20,6 +20,7 @@ class LabType(Enum):
     MEDSI = "medsi"
     INVITRO = "invitro"
     GEMOTEST = "gemotest"
+    CITILAB = "citilab"
     UNKNOWN = "unknown"
 
 
@@ -65,10 +66,28 @@ def _count_helix_pairs(text: str) -> int:
     return count
 
 
+# ─── Citilab: структурная проверка (единица приклеена к имени) ───
+
+_CITILAB_PREFIX_RE = re.compile(
+    r'^(?:10\s*\^?\s*\d{1,2}\s*/\s*[а-яa-z]+'
+    r'|[а-яА-Яa-zA-Z]{1,6}/[а-яa-z]+'
+    r'|МЕ/[а-яa-z]+'
+    r'|мм/ч(?:ас)?'
+    r'|%|фл|пг)[А-ЯЁ]'
+)
+
+
+def _count_citilab_prefix_lines(text: str) -> int:
+    """Считает строки с приклеенной единицей к имени (``г/лГемоглобин``)."""
+    return sum(1 for line in text.splitlines()
+               if _CITILAB_PREFIX_RE.match(line.strip()))
+
+
 # ─── Реестр callable-проверок ───
 _CALLABLE_CHECKS = {
     "is_medsi_format": _check_medsi_format,
     "helix_pairs": lambda text: _count_helix_pairs(text) >= 5,
+    "citilab_prefix_lines": lambda text: _count_citilab_prefix_lines(text) >= 5,
 }
 
 
@@ -164,6 +183,7 @@ def detect_lab_format(raw_text: str) -> str:
         LabType.HELIX:    "helix",
         LabType.INVITRO:  "generic",   # пока нет отдельного парсера
         LabType.GEMOTEST: "generic",   # обрабатывается через universal
+        LabType.CITILAB:  "generic",   # обрабатывается через universal
         LabType.UNKNOWN:  "generic",
     }
     return mapping.get(result.lab_type, "generic")

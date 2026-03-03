@@ -85,6 +85,21 @@ LAB_SIGNATURES = [
             {"kind": "domain",     "pattern": "www.invitro.ru",       "weight": 0.5},
         ],
     },
+
+    # ═══ CITILAB ═══
+    {
+        "lab_type": LabType.CITILAB,
+        "threshold": 0.3,
+        "signatures": [
+            {"kind": "name",       "pattern": "ситилаб",            "weight": 0.5},
+            {"kind": "name",       "pattern": "citilab",            "weight": 0.5},
+            {"kind": "domain",     "pattern": "citilab.ru",         "weight": 0.5},
+            {"kind": "domain",     "pattern": "www.citilab.ru",     "weight": 0.5},
+            {"kind": "name",       "pattern": 'ООО "ИММУНИТЕТ"',   "weight": 0.3},
+            {"kind": "structural", "pattern": "citilab_prefix_lines", "weight": 0.7,
+             "callable": True},
+        ],
+    },
 ]
 
 
