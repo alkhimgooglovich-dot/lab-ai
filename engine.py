@@ -116,7 +116,9 @@ SYSTEM_PROMPT = (
     "- Формулировки: «может быть связано», «имеет смысл обсудить», «для уточнения»\n"
     "- По каждому отклонению — конкретное пояснение (что отражает показатель, с чем может быть связано отклонение)\n"
     "- НЕ водянистый текст, а конкретная справочная информация по каждому показателю\n"
-    "- Опираться строго на ФАКТЫ ниже. Если данных мало — указать, что информация ограничена."
+    "- Опираться строго на ФАКТЫ ниже. Если данных мало — указать, что информация ограничена.\n"
+    "- Если ВСЕ показатели в норме — ответ КРАТКИЙ и ПОЗИТИВНЫЙ. Не отправляй к врачу без причины. "
+    "Не генерируй длинные списки вопросов и рекомендаций."
 )
 
 
@@ -1608,6 +1610,98 @@ def _prestrip_interstitial_noise(raw_text: str) -> str:
     return "\n".join(result)
 
 
+# ------------------------------------------------------------------
+# Conditional reference-range merging (multi-line refs like Утро/Вечер)
+# ------------------------------------------------------------------
+
+_CONDITIONAL_REF_PREFIXES = (
+    "утро", "вечер", "день", "ночь",                         # time of day
+    "мужчин", "мужской", "женщин", "женский",                 # sex
+    "дети", "ребен", "взросл", "новорожден", "пожил",         # age groups
+    "беременн", "1 триместр", "2 триместр", "3 триместр",     # pregnancy
+    "1-й триместр", "2-й триместр", "3-й триместр",
+    "фолликулярн", "овуляторн", "лютеинов",                   # menstrual cycle
+    "менопауз", "постменопауз",
+    "до 1 года", "1-5 лет", "5-10 лет", "10-15 лет",         # age sub-ranges
+    "от 1 года", "от 5 лет", "от 10 лет", "старше",
+)
+
+# Pattern: optional parenthesised qualifier + float-float  (comma or dot)
+_COND_RANGE_RE = re.compile(
+    r'(?:\([^)]*\)\s*)?'                       # optional (0-18) etc.
+    r'(\d+[.,]?\d*)\s*[-–—]\s*(\d+[.,]?\d*)'   # low - high
+)
+
+# Biomarker line: starts with ≥1 Cyrillic/Latin word, then a number, then optional unit-like token
+_BIO_LINE_RE = re.compile(
+    r'^(?P<name>[A-Za-zА-Яа-яёЁ][A-Za-zА-Яа-яёЁ0-9\s\-\(\)]+?)\s+'
+    r'(?P<value>\d+[.,]?\d*)\s*'
+    r'(?P<unit>[A-Za-zА-Яа-яёЁ/%µ^*°·][A-Za-zА-Яа-яёЁ0-9/%µ^*°·]*(?:/[A-Za-zА-Яа-яёЁ0-9/%µ^*°·]+)?)?'
+    r'\s*$'
+)
+
+
+def _merge_conditional_refs(text: str) -> str:
+    """Merge multi-line conditional reference ranges into the biomarker line.
+
+    Many Russian labs print reference ranges split by condition (time of day,
+    sex, age, pregnancy trimester, etc.) on separate lines below the result.
+    This function detects such patterns and appends the WIDEST range to the
+    biomarker line, removing the conditional sub-lines.
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        # Check if current line looks like a biomarker result (name + number + optional unit)
+        m = _BIO_LINE_RE.match(stripped)
+        if not m:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        # Peek ahead for conditional reference lines
+        lows: list[float] = []
+        highs: list[float] = []
+        j = i + 1
+        while j < len(lines):
+            cand = lines[j].strip()
+            if not cand:
+                # skip blank lines between conditional refs
+                j += 1
+                continue
+            cand_lower = cand.lower()
+            is_cond = any(cand_lower.startswith(pfx) for pfx in _CONDITIONAL_REF_PREFIXES)
+            if not is_cond:
+                break
+            # Extract range from this conditional line
+            rm = _COND_RANGE_RE.search(cand)
+            if rm:
+                lo = float(rm.group(1).replace(",", "."))
+                hi = float(rm.group(2).replace(",", "."))
+                lows.append(lo)
+                highs.append(hi)
+            j += 1
+
+        if lows and highs:
+            # Append widest range to the biomarker line
+            widest_lo = min(lows)
+            widest_hi = max(highs)
+            # Format without trailing zeros for cleanliness
+            lo_s = f"{widest_lo:g}"
+            hi_s = f"{widest_hi:g}"
+            out.append(f"{stripped} {lo_s}-{hi_s}")
+            _dbg(f"_merge_conditional_refs: merged {j - i - 1} conditional lines "
+                 f"into '{stripped}' → ref {lo_s}-{hi_s}")
+            i = j  # skip past all conditional lines
+        else:
+            out.append(lines[i])
+            i += 1
+
+    return "\n".join(out)
+
+
 def _smart_to_candidates(raw_text: str) -> str:
     """
     Авто-детект формата лаборатории и преобразование в TSV-кандидаты.
@@ -1623,6 +1717,9 @@ def _smart_to_candidates(raw_text: str) -> str:
     from parsers.lab_detector import detect_lab, LabType
     from parsers.medsi_extractor import medsi_inline_to_candidates
     from parsers.universal_extractor import universal_extract
+
+    # Merge multi-line conditional reference ranges before any extraction
+    raw_text = _merge_conditional_refs(raw_text)
 
     det = detect_lab(raw_text)
     _dbg(f"_smart_to_candidates: detected {det.lab_type.value} "
@@ -2066,6 +2163,31 @@ def suggest_specialists(high_low: List[Item]) -> List[str]:
 
 
 # ==========================
+# LLM refusal detection
+# ==========================
+_REFUSAL_PATTERNS = (
+    "не могу обсуждать",
+    "не могу помочь с этим",
+    "давайте поговорим о чём-нибудь",
+    "я не в состоянии",
+    "к сожалению, я не могу",
+    "не могу предоставить",
+    "выходит за рамки",
+    "не имею возможности",
+)
+
+
+def _is_llm_refusal(text: str) -> bool:
+    """Check if LLM response is a refusal to answer."""
+    text_lower = text.lower().strip()
+    # Very short responses are suspicious
+    if len(text_lower) < 100:
+        return any(p in text_lower for p in _REFUSAL_PATTERNS)
+    # For longer responses, only check the first 200 chars
+    return any(p in text_lower[:200] for p in _REFUSAL_PATTERNS)
+
+
+# ==========================
 # LLM call (ретраи)
 # ==========================
 def call_yandexgpt(iam_token: str, user_text: str) -> str:
@@ -2104,9 +2226,32 @@ def call_yandexgpt(iam_token: str, user_text: str) -> str:
 
 def build_llm_prompt(sex: str, age: int, high_low: List[Item], dict_expl: str, specialist_list: List[str]) -> str:
     if not high_low:
-        deviations = "Отклонений по распознанным референсам нет."
-    else:
-        deviations = "\n".join(
+        # ALL NORMAL — short reassuring response
+        return f"""Пациент: пол {sex}, возраст {age}.
+
+ФАКТЫ:
+Все распознанные показатели находятся в пределах референсных значений лаборатории. Отклонений не обнаружено.
+
+ИНСТРУКЦИЯ:
+Сформируй КОРОТКИЙ информационный ответ (максимум 10-15 строк). Структура:
+
+**ДИСКЛЕЙМЕР**
+Одно предложение: данная информация носит справочный характер и не является диагнозом.
+
+**КРАТКИЙ ИТОГ ПО ФАКТАМ**
+Одно предложение: все распознанные показатели в пределах референсных значений, отклонений не обнаружено.
+
+**ЧТО ОТРАЖАЮТ ЭТИ ПОКАЗАТЕЛИ**
+Кратко (1-2 предложения): что в целом показывают сданные анализы.
+
+ВАЖНО:
+- НЕ отправляй к специалистам, если нет отклонений.
+- НЕ генерируй список вопросов врачу — при нормальных результатах это не нужно.
+- НЕ генерируй раздел "Что имеет смысл обсудить с врачом" — нечего обсуждать.
+- Ответ должен быть КОРОТКИМ и ПОЗИТИВНЫМ — всё в порядке.""".strip()
+
+    # There ARE deviations
+    deviations = "\n".join(
             [
                 f"- {it.raw_name}: {it.status} | значение {it.value:g} {it.unit or ''} | "
                 f"норма {it.ref_text or format_range(it.ref)}"
@@ -2117,7 +2262,16 @@ def build_llm_prompt(sex: str, age: int, high_low: List[Item], dict_expl: str, s
 
     specialist_hint = ", ".join(specialist_list) if specialist_list else "терапевт"
 
+    small_panel_note = ""
+    if len(high_low) < 5:
+        small_panel_note = (
+            "\nПримечание: в документе распознано небольшое количество показателей. "
+            "Это нормально — пациент мог сдать отдельные анализы. "
+            "Дайте информативную расшифровку по всем имеющимся показателям.\n"
+        )
+
     return f"""Пациент: пол {sex}, возраст {age}.
+{small_panel_note}
 
 ФАКТЫ (строго по отклонениям от референсов лаборатории):
 {deviations}
@@ -2997,8 +3151,14 @@ def generate_pdf_report(
     
     # Если ни одна панель не обнаружена - показываем нейтральное предупреждение
     if max(panel_scores.values()) < PANEL_THRESHOLD and len(parsed_names_before) < 5:
-        missing_warnings.append("Распознано мало показателей, возможно неполный разбор.")
-        _dbg(f"WARN: low panel scores, total items: {len(parsed_names_before)}")
+        # Only warn if parse quality suggests problems (not just a small panel)
+        _all_confident = all(getattr(it, 'confidence', 0) >= 0.7 for it in items)
+        _ps_here = quality.get("metrics", {}).get("parse_score", 0)
+        if not (_all_confident and _ps_here >= 70.0):
+            missing_warnings.append("Распознано мало показателей, возможно неполный разбор.")
+            _dbg(f"WARN: low panel scores + low quality, total items: {len(parsed_names_before)}")
+        else:
+            _dbg(f"Small panel ({len(parsed_names_before)} items) with high quality — no warning needed")
 
     # НЕ удаляем проценты - они важны для анализа лейкоформулы
     # Функция drop_percent_if_absolute теперь возвращает все items без изменений
@@ -3022,7 +3182,19 @@ def generate_pdf_report(
     _valid_count = quality["valid_value_count"]
     _ps = quality.get("metrics", {}).get("parse_score", 100.0)
 
-    _eligible_by_count = _valid_count >= 5
+    # Allow LLM for small panels if parse quality is demonstrably high
+    if _valid_count >= 5:
+        _eligible_by_count = True
+    elif _valid_count >= 1:
+        # Small panel: allow LLM only if ALL items have high confidence
+        # and parse_score is good (indicates clean source, not OCR garbage)
+        _all_high_confidence = all(
+            getattr(it, 'confidence', 0) >= 0.7 for it in items
+        )
+        _eligible_by_count = _all_high_confidence and _ps >= 70.0
+    else:
+        _eligible_by_count = False
+
     _eligible_by_score = _ps >= LLM_MIN_PARSE_SCORE
 
     # Определяем решение
@@ -3039,6 +3211,7 @@ def generate_pdf_report(
     quality["metrics"]["llm_gate"] = {
         "eligible_by_valid_count": _eligible_by_count,
         "eligible_by_parse_score": _eligible_by_score,
+        "small_panel_override": _valid_count < 5 and _eligible_by_count,
         "min_parse_score": LLM_MIN_PARSE_SCORE,
         "parse_score": _ps,
         "decision": _llm_decision,
@@ -3071,6 +3244,23 @@ def generate_pdf_report(
             token = get_iam_token()
             answer = call_yandexgpt(token, llm_prompt)
             answer = re.sub(r"\n{3,}", "\n\n", answer).strip()
+
+            # Detect LLM refusal and retry with softened prompt
+            if _is_llm_refusal(answer):
+                _dbg(f"LLM refusal detected: {answer[:100]}... Retrying with softened prompt.")
+                softened_prompt = (
+                    "Ты — справочный помощник, аналог медицинской энциклопедии. "
+                    "Твоя задача — дать ОБЩУЮ ОБРАЗОВАТЕЛЬНУЮ информацию о лабораторных показателях. "
+                    "Это НЕ медицинская консультация, а информационная справка, как в учебнике.\n\n"
+                    + llm_prompt
+                )
+                answer = call_yandexgpt(token, softened_prompt)
+                answer = re.sub(r"\n{3,}", "\n\n", answer).strip()
+
+                # If still refusing — use fallback text
+                if _is_llm_refusal(answer):
+                    _dbg(f"LLM refusal on retry: {answer[:100]}... Using fallback text.")
+                    answer = build_fallback_text(sex, age, items, high_low)
         except Exception as e:
             _dbg(f"LLM failed: {e}")
             answer = build_fallback_text(sex, age, items, high_low)
