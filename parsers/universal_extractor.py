@@ -369,6 +369,26 @@ def _try_parse_one_line(line: str) -> Optional[str]:
     left = s_norm[:ref_span[0]].strip()
     right = s_norm[ref_span[1]:].strip()
 
+    # --- Dual-operator: "Name <op> value unit <op> ref" ---
+    # When first comp_match is used as ref but left has no digits,
+    # look for a second comp operator → first is value, second is ref.
+    if not range_match and comp_match and ref_span == comp_match.span():
+        if not re.search(r"\d", left):
+            second_comp = re.search(
+                r"(<=|>=|<|>|≤|≥)\s*(-?\d+(?:[.,]\d+)?)", right
+            )
+            if second_comp:
+                value_num = _parse_float(comp_match.group(2).replace(",", "."))
+                if value_num is not None:
+                    op2 = second_comp.group(1).replace("≤", "<=").replace("≥", ">=")
+                    x2 = second_comp.group(2).replace(",", ".")
+                    new_ref = f"{op2}{x2}"
+                    between = right[:second_comp.start()].strip()
+                    unit = between if between else ""
+                    name_part = left.strip()
+                    if name_part and re.search(r"[A-Za-zА-Яа-я]", name_part):
+                        return f"{name_part}\t{value_num:g}\t{new_ref}\t{unit}".strip()
+
     # Ищем значение в left
     left_norm = left.replace(",", ".")
     left_norm = _normalize_scientific_notation(left_norm)
@@ -411,6 +431,8 @@ def _try_parse_one_line(line: str) -> Optional[str]:
         if value is None:
             return None
         name_part = left_norm.rsplit(value_str, 1)[0].strip()
+        # Strip trailing comparison operators (e.g., "Тестостерон >" → "Тестостерон")
+        name_part = re.sub(r'\s*[<>≤≥]=?\s*$', '', name_part).strip()
         unit = ""
         after_value = left_norm.split(value_str, 1)[1] if value_str in left_norm else ""
         if after_value:
@@ -463,6 +485,8 @@ def _parse_value_unit_from_line(s: str) -> Tuple[Optional[float], str]:
     t = t.replace("↑", "").replace("↓", "").replace("+", "").strip()
     # Убираем trailing dash (Гемотест: "0.28-" означает ↓)
     t = re.sub(r"^(\d+(?:[.,]\d+)?)\s*-$", r"\1", t)
+    # Strip leading comparison operators: "< 37 пмоль/л" → "37 пмоль/л"
+    t = re.sub(r"^[<>≤≥]=?\s*", "", t).strip()
     t = _normalize_scientific_notation(t)
 
     # *10^N (включая x10^N из pypdf после P10-склейки)

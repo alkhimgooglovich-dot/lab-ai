@@ -291,6 +291,22 @@ EXPLAIN_DICT = {
     "FOLAT":  "Фолиевая кислота (фолат) — витамин группы B; дефицит может влиять на кроветворение.",
     "HCY":    "Гомоцистеин — аминокислота; повышение может быть связано с дефицитом витаминов B и другими факторами.",
     "PSA":    "ПСА (простатический специфический антиген) — маркёр, используемый при скрининге состояния предстательной железы.",
+
+    # ═══════════════════════════════════════
+    # Половые гормоны / надпочечники
+    # ═══════════════════════════════════════
+    "E2":     "Эстрадиол — основной эстроген. У мужчин оценивается при гинекомастии и бесплодии.",
+    "PRL":    "Пролактин — гормон гипофиза. Повышение может быть связано с различными состояниями.",
+    "TESTO":  "Тестостерон общий — основной андроген. Оценивается при подозрении на гормональные нарушения.",
+    "TESTO_FREE": "Тестостерон свободный — биологически активная фракция тестостерона.",
+    "PROG":   "Прогестерон — гормон жёлтого тела. Оценивается в контексте репродуктивной функции.",
+    "FSH":    "ФСГ (фолликулостимулирующий гормон) — регулятор репродуктивной функции.",
+    "LH":     "ЛГ (лютеинизирующий гормон) — регулятор синтеза половых гормонов.",
+    "DHEA":   "ДГЭА-сульфат — надпочечниковый андроген. Маркёр функции надпочечников.",
+    "CORT":   "Кортизол — гормон стресса. Оценивается при подозрении на дисфункцию надпочечников.",
+    "AMH":    "Антимюллеров гормон — маркёр овариального резерва у женщин.",
+    "IGF1":   "Инсулиноподобный фактор роста 1 — маркёр активности гормона роста.",
+    "GH":     "Соматотропный гормон (гормон роста) — регулятор роста и метаболизма.",
 }
 
 SPECIALIST_MAP = {
@@ -402,6 +418,18 @@ SPECIALIST_MAP = {
     "VITB12":  {"терапевт", "гематолог"},
     "PSA":     {"терапевт", "уролог"},
     "HCY":     {"терапевт", "кардиолог"},
+
+    # Половые гормоны / надпочечники
+    "E2":      {"терапевт", "эндокринолог", "гинеколог"},
+    "PRL":     {"терапевт", "эндокринолог"},
+    "TESTO":   {"терапевт", "эндокринолог", "уролог"},
+    "TESTO_FREE": {"терапевт", "эндокринолог", "уролог"},
+    "PROG":    {"терапевт", "эндокринолог", "гинеколог"},
+    "FSH":     {"терапевт", "эндокринолог", "гинеколог"},
+    "LH":      {"терапевт", "эндокринолог", "гинеколог"},
+    "DHEA":    {"терапевт", "эндокринолог"},
+    "CORT":    {"терапевт", "эндокринолог"},
+    "AMH":     {"терапевт", "гинеколог", "репродуктолог"},
 }
 
 
@@ -711,6 +739,11 @@ ALIASES = {
     "МНО": "INR",
     "АЧТВ": "APTT",
     "ОЖСС": "TIBC",
+    # Половые гормоны / надпочечники
+    "E2": "E2", "PRL": "PRL", "TESTO": "TESTO", "TESTO_FREE": "TESTO_FREE",
+    "PROG": "PROG", "FSH": "FSH", "LH": "LH",
+    "DHEA": "DHEA", "CORT": "CORT", "AMH": "AMH",
+    "IGF1": "IGF1", "GH": "GH",
 }
 
 RUS_NAME_MAP = {
@@ -887,6 +920,24 @@ RUS_NAME_MAP = {
     "кальций": "CA",
     "лдг": "LDH",
     "щф": "ALP",
+
+    # ── Половые гормоны / надпочечники ──
+    "эстрадиол": "E2",
+    "пролактин": "PRL",
+    "тестостерон общ": "TESTO",
+    "тестостерон свободн": "TESTO_FREE",
+    "тестостерон": "TESTO",
+    "прогестерон": "PROG",
+    "фолликулостимулирующ": "FSH",
+    "фсг": "FSH",
+    "лютеинизирующ": "LH",
+    "лг": "LH",
+    "дгэа": "DHEA",
+    "дегидроэпиандростерон": "DHEA",
+    "кортизол": "CORT",
+    "инсулиноподобный фактор": "IGF1",
+    "соматотропный": "GH",
+    "антимюллеров": "AMH",
 }
 
 
@@ -1209,7 +1260,9 @@ def _parse_value_unit_from_line(s: str) -> Tuple[Optional[float], str]:
     """
     t = re.sub(r"\s+", " ", (s or "").strip())
     t = t.replace("↑", "").replace("↓", "").replace("+", "").strip()
-    
+    # Strip leading comparison operators: "< 37 пмоль/л" → "37 пмоль/л"
+    t = re.sub(r"^[<>≤≥]=?\s*", "", t).strip()
+
     # Нормализуем научную нотацию
     t = _normalize_scientific_notation(t)
     
@@ -1302,6 +1355,26 @@ def _try_parse_one_line_row(line: str) -> Optional[str]:
     left = s[:ref_span[0]].strip()
     right = s[ref_span[1]:].strip()
 
+    # --- Dual-operator: "Name <op> value unit <op> ref" ---
+    # When first comp_match is used as ref but left has no digits,
+    # look for a second comp operator → first is value, second is ref.
+    if not range_match and comp_match and ref_span == comp_match.span():
+        if not re.search(r"\d", left):
+            second_comp = re.search(
+                r"(<=|>=|<|>|≤|≥)\s*(-?\d+(?:[.,]\d+)?)", right
+            )
+            if second_comp:
+                value_num = parse_float(comp_match.group(2).replace(",", "."))
+                if value_num is not None:
+                    op2 = second_comp.group(1).replace("≤", "<=").replace("≥", ">=")
+                    x2 = second_comp.group(2).replace(",", ".")
+                    new_ref = f"{op2}{x2}"
+                    between = right[:second_comp.start()].strip()
+                    unit = between if between else ""
+                    name_part = left.strip()
+                    if name_part and re.search(r"[A-Za-zА-Яа-я]", name_part):
+                        return f"{name_part}\t{value_num:g}\t{new_ref}\t{unit}".strip()
+
     # значение — последнее число в left (или число перед *10^N)
     left_norm = left.replace(",", ".")
     left_norm = _normalize_scientific_notation(left_norm)  # Нормализуем научную нотацию
@@ -1348,6 +1421,8 @@ def _try_parse_one_line_row(line: str) -> Optional[str]:
         if value is None:
             return None
         name_part = left_norm.rsplit(value_str, 1)[0].strip()
+        # Strip trailing comparison operators (e.g., "Тестостерон >" → "Тестостерон")
+        name_part = re.sub(r'\s*[<>≤≥]=?\s*$', '', name_part).strip()
         # unit: чаще всего после value в left (например "73.0 %") или в right
         unit = ""
         # Ищем единицу после числа в left
@@ -2902,8 +2977,22 @@ def generate_pdf_report(
         for group_name, expected_names in cbc_expected_groups.items():
             missing = expected_names - parsed_names_before
             if missing:
-                missing_str = ", ".join(sorted(missing))
-                missing_warnings.append(f"Не найдены показатели группы '{group_name}': {missing_str}")
+                if missing == expected_names:
+                    # ALL markers of the group are absent → test panel was not ordered
+                    if group_name == "лейкоформула_проценты":
+                        missing_warnings.append(
+                            "В загруженном бланке отсутствует лейкоцитарная формула "
+                            "(не входила в назначенный профиль анализов)."
+                        )
+                    else:
+                        missing_warnings.append(
+                            f"В загруженном бланке отсутствует группа '{group_name}' "
+                            "(не входила в назначенный профиль анализов)."
+                        )
+                else:
+                    # SOME markers missing → possible parsing problem
+                    missing_str = ", ".join(sorted(missing))
+                    missing_warnings.append(f"Не найдены показатели группы '{group_name}': {missing_str}")
                 _dbg(f"WARN: missing {group_name}: {missing}")
     
     # Если ни одна панель не обнаружена - показываем нейтральное предупреждение

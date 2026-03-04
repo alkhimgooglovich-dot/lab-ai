@@ -54,7 +54,7 @@
         {% for warn in missing_warnings %}
           {{ warn }}<br>
         {% endfor %}
-        {% if "Распознано мало показателей" not in missing_warnings|join(", ") %}
+        {% if "Распознано мало показателей" not in missing_warnings|join(", ") and "не входила в назначенный профиль" not in missing_warnings|join(", ") %}
           Проверьте качество файла или загрузите другой формат.
         {% endif %}
       </div>
